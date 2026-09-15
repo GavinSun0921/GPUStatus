@@ -139,9 +139,9 @@ function Shell({
                 antd token, which keeps this out of the hardcoded-colour rule. */}
             <span
               style={{
-                width: 30,
-                height: 30,
-                borderRadius: 7,
+                width: 42,
+                height: 42,
+                borderRadius: 10,
                 background: token.colorWhite,
                 boxShadow: `inset 0 0 0 1px ${token.colorBorderSecondary}`,
                 display: 'inline-flex',
@@ -151,13 +151,13 @@ function Shell({
               }}
             >
               {/* Decorative: the site name sits immediately beside it. */}
-              <img src="/logo.png" alt="" width={25} height={25} style={{ display: 'block' }} />
+              <img src="/logo.png" alt="" width={36} height={36} style={{ display: 'block' }} />
             </span>
-            <Typography.Text strong style={{ fontSize: 17, letterSpacing: 0.2 }}>
+            <Typography.Text strong style={{ fontSize: 23, letterSpacing: 0.2, lineHeight: 1.15 }}>
               {snapshot?.site || 'GPUStatus'}
             </Typography.Text>
             {snapshot?.site && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
                 GPUStatus · GPU 集群监控
               </Typography.Text>
             )}
