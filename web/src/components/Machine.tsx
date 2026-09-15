@@ -300,6 +300,17 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
 }
 
 /**
+ * Drop the leading slash from a path for display: "/home" -> "home".
+ *
+ * The root mount is the one case that must NOT be stripped -- "/" would become
+ * an empty label, which reads as a rendering bug rather than as a mount point.
+ */
+function shortPath(path: string): string {
+  const trimmed = path.replace(/^\/+/, '');
+  return trimmed === '' ? '/' : trimmed;
+}
+
+/**
  * The bordered tile used for every disk entry.
  *
  * Kept as a hook so the panel below stays declarative and the four properties
@@ -354,9 +365,7 @@ function DiskPanel({ host }: { host: Host }) {
             return (
               <Col xs={24} sm={12} md={8} lg={6} key={label}>
                 <div className="disk-tile" style={box}>
-                  <Typography.Text code style={{ fontSize: 12 }}>
-                    {label}
-                  </Typography.Text>
+                  <Typography.Text style={{ fontSize: 12.5 }}>{shortPath(label)}</Typography.Text>
                   <div>
                     <Typography.Text type="warning" style={{ fontSize: 11.5 }}>
                       目录不存在
@@ -379,17 +388,19 @@ function DiskPanel({ host }: { host: Host }) {
                     gap: 8,
                   }}
                 >
+                  {/* Plain text rather than a code chip: the grey monospace
+                      box dominated the tile and made a column of them look
+                      heavy. The full path stays in the tooltip. */}
                   <Typography.Text
-                    code
-                    style={{ fontSize: 12 }}
+                    style={{ fontSize: 12.5 }}
                     ellipsis
-                    title={showMount ? `挂载点 ${disk.mount}` : undefined}
+                    title={showMount ? `挂载点 ${disk.mount}` : disk.path ?? undefined}
                   >
-                    {label}
+                    {shortPath(label)}
                     {showMount && (
                       <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                         {' '}
-                        → {disk.mount}
+                        → {shortPath(disk.mount ?? '')}
                       </Typography.Text>
                     )}
                   </Typography.Text>
