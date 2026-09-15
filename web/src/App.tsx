@@ -132,15 +132,27 @@ function Shell({
               tool name is secondary. `site` falls back to "GPUStatus" so an
               unconfigured deployment still has a title. */}
           <Space size={10} align="center">
+            {/* The emblem is dark blue, roughly 2:1 against the dark theme's
+                background, so it sits on a chip that stays light in BOTH themes
+                rather than being recoloured -- it is an official mark, and its
+                colours are not ours to adjust. `colorWhite` is a theme-invariant
+                antd token, which keeps this out of the hardcoded-colour rule. */}
             <span
               style={{
-                width: 11,
-                height: 11,
-                borderRadius: 3,
-                background: token.colorPrimary,
-                display: 'inline-block',
+                width: 30,
+                height: 30,
+                borderRadius: 7,
+                background: token.colorWhite,
+                boxShadow: `inset 0 0 0 1px ${token.colorBorderSecondary}`,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flex: 'none',
               }}
-            />
+            >
+              {/* Decorative: the site name sits immediately beside it. */}
+              <img src="/logo.png" alt="" width={25} height={25} style={{ display: 'block' }} />
+            </span>
             <Typography.Text strong style={{ fontSize: 17, letterSpacing: 0.2 }}>
               {snapshot?.site || 'GPUStatus'}
             </Typography.Text>
