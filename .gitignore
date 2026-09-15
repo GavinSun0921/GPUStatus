@@ -1,0 +1,48 @@
+# ============================================================================
+#  GPUStatus
+# ============================================================================
+
+# ---------------------------------------------------------------- runtime ---
+# The SQLite database holds all usage history AND the admin session secret.
+# It is per-deployment state, never source: do not commit it.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# ------------------------------------------------------------ local config ---
+# Your real settings: internal hostnames, disk layout, and the admin password
+# hash. The sanitised `config/hosts.example.json` IS committed; copy it to
+# `hosts.json` on a new deployment.
+#
+# Note the example suggests `password_sha256` rather than a plaintext password,
+# so even this local file does not carry the secret itself.
+config/hosts.json
+config/hosts.local.json
+
+# Written once by the admin page before its first save overwrites the file.
+config/hosts.json.bak
+
+# Validation scratch files (older versions wrote these beside the config).
+config/.hosts.json.validate-*
+
+# ---------------------------------------------------------------- build ------
+# Rebuild with `npm run build`; these are generated artefacts.
+web/dist/
+web/dist-ssr/
+
+# ---------------------------------------------------------- dependencies -----
+# The backend itself uses only Node built-ins. `web/node_modules` belongs to the
+# React frontend; the root one holds the optional screenshot tool.
+node_modules/
+
+# ------------------------------------------------------- logs and editors ----
+*.log
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~

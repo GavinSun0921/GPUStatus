@@ -1,0 +1,540 @@
+/**
+ * Persistence layer.
+ *
+ * Uses `node:sqlite`, which ships with Node itself -- so the backend has zero
+ * npm dependencies and the whole state is one portable .db file.
+ *
+ * Storage strategy
+ * ----------------
+ *  * Raw per-sample tables keep the full detail (every GPU, every PID) for a
+ *    configurable window (default 7 days) and are then pruned.
+ *  * `usage_rollup` keeps per-(hour, host, user) integrals FOREVER. Raw data is
+ *    therefore disposable while year-end accounting survives.
+ *
+ *    Three independent integrals are accumulated, because "usage" is ambiguous
+ *    and each answers a different question:
+ *
+ *      gpu_seconds      SUM(#GPUs held) * dt   -> GPU-hours OCCUPIED
+ *                         Fair-share / allocation metric. Penalises holding a
+ *                         card idle, which is usually what a lab wants to see.
+ *
+ *      sm_gpu_seconds   SUM(SM%) / 100 * dt    -> EFFECTIVE GPU-hours
+ *                         Actual compute delivered. A job at 30% SM for an hour
+ *                         counts 0.3. Rewards real throughput.
+ *
+ *      mem_mib_seconds  SUM(used MiB) * dt     -> memory-GiB-hours
+ *                         Capacity pressure; the metric that explains "the card
+ *                         is empty but I cannot allocate".
+ *
+ *    Accumulating at write time (rather than re-aggregating raw rows later) is
+ *    what makes pruning safe: no accounting information is ever discarded.
+ */
+
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+const HOUR_MS = 3600 * 1000;
+const SCHEMA_VERSION = 1;
+
+/** SQLite cannot bind NaN/Infinity/undefined; normalise them to NULL. */
+function n(v) {
+  if (v === null || v === undefined) return null;
+  const x = Number(v);
+  return Number.isFinite(x) ? x : null;
+}
+
+function s(v) {
+  if (v === null || v === undefined) return null;
+  return String(v);
+}
+
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = await import('node:sqlite'));
+} catch (err) {
+  throw new Error(
+    'This application needs the built-in SQLite module (node:sqlite), available in ' +
+      `Node.js >= 22.5. Detected ${process.version}. On Node 22 start with ` +
+      `\`node --experimental-sqlite server/index.js\`.\nOriginal error: ${err.message}`,
+  );
+}
+
+/**
+ * Group per-process rows into per-user usage for one sample.
+ *
+ * Two deliberate choices:
+ *  - GPUs are counted as DISTINCT gpu indices, so four processes on one card is
+ *    one GPU-hour, not four.
+ *  - SM percentages of several processes sharing one card are summed but capped
+ *    at 100, so a shared card cannot report more than one GPU's worth of
+ *    effective compute.
+ */
+export function aggregateUserUsage(procs) {
+  const byUser = new Map();
+
+  for (const p of procs) {
+    const username = p.username ? String(p.username) : null;
+    if (!username) continue;
+
+    let u = byUser.get(username);
+    if (!u) {
+      u = { gpus: new Set(), smByGpu: new Map(), memSum: 0, procCount: 0 };
+      byUser.set(username, u);
+    }
+    if (Number.isInteger(p.gpuIndex)) u.gpus.add(p.gpuIndex);
+
+    const sm = Number.isFinite(p.smPct) ? Math.max(0, p.smPct) : 0;
+    const key = Number.isInteger(p.gpuIndex) ? p.gpuIndex : -1;
+    u.smByGpu.set(key, (u.smByGpu.get(key) ?? 0) + sm);
+
+    u.memSum += Number.isFinite(p.usedMemMib) ? Math.max(0, p.usedMemMib) : 0;
+    u.procCount += 1;
+  }
+
+  const out = [];
+  for (const [username, u] of byUser) {
+    let smSum = 0;
+    for (const v of u.smByGpu.values()) smSum += Math.min(v, 100);
+    out.push({
+      username,
+      gpus: u.gpus.size,
+      smSum,
+      memSum: u.memSum,
+      procCount: u.procCount,
+    });
+  }
+  return out;
+}
+
+export class Db {
+  constructor(filePath, { intervalMs = 5000 } = {}) {
+    if (filePath !== ':memory:') mkdirSync(dirname(filePath), { recursive: true });
+    this.db = new DatabaseSync(filePath);
+    this.filePath = filePath;
+    this.intervalMs = intervalMs;
+
+    // WAL keeps the poller writing while the API reads. NORMAL synchronous mode
+    // is the right durability/speed trade-off for monitoring data.
+    this.db.exec('PRAGMA journal_mode = WAL');
+    this.db.exec('PRAGMA synchronous = NORMAL');
+    this.db.exec('PRAGMA busy_timeout = 5000');
+    this.db.exec('PRAGMA foreign_keys = ON');
+
+    this.#migrate();
+    this.#prepare();
+    this.prevTs = this.#loadPrevTimestamps();
+  }
+
+  #migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS hosts (
+        id          TEXT PRIMARY KEY,
+        label       TEXT NOT NULL,
+        ssh_target  TEXT NOT NULL,
+        grp         TEXT,
+        expect_gpus INTEGER,
+        first_seen  INTEGER NOT NULL,
+        last_ok     INTEGER,
+        last_attempt INTEGER,
+        last_error  TEXT,
+        last_hostname TEXT,
+        driver_version TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS host_sample (
+        ts             INTEGER NOT NULL,
+        host_id        TEXT    NOT NULL,
+        cpu_pct        REAL,
+        iowait_pct     REAL,
+        ncpu           INTEGER,
+        load1          REAL,
+        load5          REAL,
+        load15         REAL,
+        running_procs  INTEGER,
+        mem_total_mib  REAL,
+        mem_used_mib   REAL,
+        mem_avail_mib  REAL,
+        mem_pct        REAL,
+        swap_total_mib REAL,
+        swap_used_mib  REAL,
+        uptime_s       INTEGER,
+        n_gpus         INTEGER,
+        driver_version TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_host_sample_ts ON host_sample(host_id, ts);
+
+      CREATE TABLE IF NOT EXISTS gpu_sample (
+        ts           INTEGER NOT NULL,
+        host_id      TEXT    NOT NULL,
+        gpu_index    INTEGER NOT NULL,
+        gpu_uuid     TEXT,
+        gpu_name     TEXT,
+        util_pct     REAL,
+        mem_used_mib REAL,
+        mem_total_mib REAL,
+        mem_util_pct REAL,
+        temp_c       REAL,
+        power_w      REAL,
+        fan_pct      REAL,
+        n_procs      INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_gpu_sample_ts ON gpu_sample(host_id, ts);
+      CREATE INDEX IF NOT EXISTS idx_gpu_sample_uuid ON gpu_sample(gpu_uuid, ts);
+
+      CREATE TABLE IF NOT EXISTS proc_sample (
+        ts           INTEGER NOT NULL,
+        host_id      TEXT    NOT NULL,
+        gpu_index    INTEGER,
+        gpu_uuid     TEXT,
+        pid          INTEGER,
+        username     TEXT,
+        proc_name    TEXT,
+        used_mem_mib REAL,
+        sm_pct       REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_proc_sample_ts ON proc_sample(ts);
+      CREATE INDEX IF NOT EXISTS idx_proc_sample_user ON proc_sample(username, ts);
+      CREATE INDEX IF NOT EXISTS idx_proc_sample_host ON proc_sample(host_id, ts);
+
+      CREATE TABLE IF NOT EXISTS usage_rollup (
+        bucket_ts       INTEGER NOT NULL,
+        host_id         TEXT    NOT NULL,
+        username        TEXT    NOT NULL,
+        gpu_seconds     REAL    NOT NULL DEFAULT 0,
+        sm_gpu_seconds  REAL    NOT NULL DEFAULT 0,
+        mem_mib_seconds REAL    NOT NULL DEFAULT 0,
+        peak_gpus       INTEGER NOT NULL DEFAULT 0,
+        peak_mem_mib    REAL    NOT NULL DEFAULT 0,
+        samples         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (bucket_ts, host_id, username)
+      );
+      CREATE INDEX IF NOT EXISTS idx_rollup_user ON usage_rollup(username, bucket_ts);
+      CREATE INDEX IF NOT EXISTS idx_rollup_bucket ON usage_rollup(bucket_ts);
+
+      CREATE TABLE IF NOT EXISTS events (
+        ts      INTEGER NOT NULL,
+        host_id TEXT    NOT NULL,
+        kind    TEXT    NOT NULL,
+        message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+    `);
+    this.db
+      .prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+      .run('schema_version', String(SCHEMA_VERSION));
+  }
+
+  #prepare() {
+    this.stmt = {
+      upsertHost: this.db.prepare(`
+        INSERT INTO hosts (id, label, ssh_target, grp, expect_gpus, first_seen)
+        VALUES (?, COALESCE(?, ?), ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          -- Only a label pinned in the config overwrites the stored name, so a
+          -- restart cannot blank the name learned from the hostname.
+          label = COALESCE(?, hosts.label),
+          ssh_target = excluded.ssh_target,
+          grp = excluded.grp, expect_gpus = excluded.expect_gpus`),
+
+      markAttempt: this.db.prepare('UPDATE hosts SET last_attempt = ? WHERE id = ?'),
+      markOk: this.db.prepare(`
+        UPDATE hosts SET last_ok = ?, last_error = NULL, last_hostname = ?,
+          driver_version = ?, label = COALESCE(?, label)
+        WHERE id = ?`),
+      markError: this.db.prepare('UPDATE hosts SET last_error = ? WHERE id = ?'),
+
+      insHostSample: this.db.prepare(`
+        INSERT INTO host_sample (ts, host_id, cpu_pct, iowait_pct, ncpu, load1, load5, load15,
+          running_procs, mem_total_mib, mem_used_mib, mem_avail_mib, mem_pct,
+          swap_total_mib, swap_used_mib, uptime_s, n_gpus, driver_version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+
+      insGpuSample: this.db.prepare(`
+        INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
+          mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+
+      insProcSample: this.db.prepare(`
+        INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username,
+          proc_name, used_mem_mib, sm_pct)
+        VALUES (?,?,?,?,?,?,?,?,?)`),
+
+      upsertRollup: this.db.prepare(`
+        INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+          sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+        VALUES (?,?,?,?,?,?,?,?,1)
+        ON CONFLICT(bucket_ts, host_id, username) DO UPDATE SET
+          gpu_seconds     = gpu_seconds     + excluded.gpu_seconds,
+          sm_gpu_seconds  = sm_gpu_seconds  + excluded.sm_gpu_seconds,
+          mem_mib_seconds = mem_mib_seconds + excluded.mem_mib_seconds,
+          peak_gpus       = MAX(peak_gpus,       excluded.peak_gpus),
+          peak_mem_mib    = MAX(peak_mem_mib,    excluded.peak_mem_mib),
+          samples         = samples + 1`),
+
+      insEvent: this.db.prepare('INSERT INTO events (ts, host_id, kind, message) VALUES (?,?,?,?)'),
+      pruneHost: this.db.prepare('DELETE FROM host_sample WHERE ts < ?'),
+      pruneGpu: this.db.prepare('DELETE FROM gpu_sample WHERE ts < ?'),
+      pruneProc: this.db.prepare('DELETE FROM proc_sample WHERE ts < ?'),
+    };
+  }
+
+  /**
+   * Last sample timestamp per host, so a restart does not lose the baseline and
+   * credit a huge dt to the first sample after boot.
+   */
+  #loadPrevTimestamps() {
+    const map = new Map();
+    for (const row of this.db.prepare('SELECT host_id, MAX(ts) AS ts FROM host_sample GROUP BY host_id').all()) {
+      map.set(row.host_id, Number(row.ts));
+    }
+    return map;
+  }
+
+  registerHosts(hosts, now = Date.now()) {
+    for (const h of hosts) {
+      // label may be null (meaning "derive it from the hostname"); the column is
+      // NOT NULL, so fall back to the id as a placeholder until the first poll.
+      this.stmt.upsertHost.run(
+        h.id, s(h.label), h.id, h.ssh, s(h.group), n(h.expectGpus), now, s(h.label),
+      );
+    }
+  }
+
+  markAttempt(hostId, ts) {
+    this.stmt.markAttempt.run(ts, hostId);
+  }
+
+  recordEvent(ts, hostId, kind, message) {
+    this.stmt.insEvent.run(ts, hostId, kind, s(message));
+  }
+
+  recordFailure(hostId, ts, error) {
+    this.stmt.markAttempt.run(ts, hostId);
+    this.stmt.markError.run(s(String(error).slice(0, 500)), hostId);
+  }
+
+  /**
+   * Persist one successful poll: raw samples for the detail view plus the
+   * permanent per-user rollup for accounting.
+   *
+   * All writes happen in a single transaction so a crash can never leave the
+   * rollup disagreeing with the raw samples.
+   */
+  recordSuccess(hostId, sample) {
+    const { ts, host, gpus, procs, uptimeS, driverVersion, hostname, label } = sample;
+
+    // Credit at most two nominal intervals per sample. A gap (poller restart,
+    // host rebooting) must not be back-filled as if the GPUs had been busy the
+    // whole time -- under-counting an outage is far safer than inventing usage.
+    const prev = this.prevTs.get(hostId);
+    let dtMs = prev === undefined ? 0 : ts - prev;
+    if (!Number.isFinite(dtMs) || dtMs < 0) dtMs = 0; // counter went backwards (host reboot)
+    if (dtMs > this.intervalMs * 2) dtMs = this.intervalMs;
+    const dtS = dtMs / 1000;
+
+    this.db.exec('BEGIN');
+    try {
+      this.stmt.insHostSample.run(
+        ts, hostId,
+        n(host.cpuPct), n(host.iowaitPct), n(host.ncpu), n(host.load1), n(host.load5), n(host.load15),
+        n(host.runningProcs), n(host.memTotalMib), n(host.memUsedMib), n(host.memAvailMib),
+        n(host.memPct), n(host.swapTotalMib), n(host.swapUsedMib),
+        n(uptimeS), n(gpus.length), s(driverVersion),
+      );
+
+      for (const g of gpus) {
+        this.stmt.insGpuSample.run(
+          ts, hostId, n(g.index), s(g.uuid), s(g.name), n(g.util),
+          n(g.memUsedMib), n(g.memTotalMib), n(g.memUtil), n(g.tempC), n(g.powerW),
+          n(g.fanPct), n(g.nProcs),
+        );
+      }
+
+      for (const p of procs) {
+        this.stmt.insProcSample.run(
+          ts, hostId, n(p.gpuIndex), s(p.gpuUuid), n(p.pid), s(p.username),
+          s(p.name), n(p.usedMemMib), n(p.smPct),
+        );
+      }
+
+      if (dtS > 0) {
+        const bucketTs = Math.floor(ts / HOUR_MS) * HOUR_MS;
+        for (const u of aggregateUserUsage(procs)) {
+          this.stmt.upsertRollup.run(
+            bucketTs, hostId, u.username,
+            u.gpus * dtS,
+            (u.smSum / 100) * dtS,
+            u.memSum * dtS,
+            u.gpus,
+            u.memSum,
+          );
+        }
+      }
+
+      this.stmt.markOk.run(ts, s(hostname), s(driverVersion), s(label), hostId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    this.prevTs.set(hostId, ts);
+  }
+
+  /** Drop raw samples past the retention window. Rollups are never pruned. */
+  pruneRaw(retentionHours, now = Date.now()) {
+    if (!retentionHours || retentionHours <= 0) return 0;
+    const cutoff = now - retentionHours * HOUR_MS;
+    let removed = 0;
+    this.db.exec('BEGIN');
+    try {
+      removed += this.stmt.pruneHost.run(cutoff).changes;
+      removed += this.stmt.pruneGpu.run(cutoff).changes;
+      removed += this.stmt.pruneProc.run(cutoff).changes;
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return removed;
+  }
+
+  // ---------------------------------------------------------------- queries --
+
+  /**
+   * Aggregated usage for a time range, grouped by user (optionally by host).
+   *
+   * `bucketSeconds` re-buckets the hourly rollups (86400 = daily, 604800 =
+   * weekly) so a year-end report is a single indexed scan.
+   */
+  queryUsage({ fromTs, toTs, hostId = null, username = null, bucketSeconds = 0 }) {
+    const where = ['bucket_ts >= ?', 'bucket_ts < ?'];
+    const params = [fromTs, toTs];
+    if (hostId) {
+      where.push('host_id = ?');
+      params.push(hostId);
+    }
+    if (username) {
+      where.push('username = ?');
+      params.push(username);
+    }
+
+    const groupBucket = bucketSeconds > 0
+      ? `CAST(bucket_ts / ${Number(bucketSeconds) * 1000} AS INTEGER) * ${Number(bucketSeconds) * 1000} AS bucket`
+      : 'bucket_ts AS bucket';
+
+    return this.db
+      .prepare(`
+        SELECT ${groupBucket},
+               username,
+               ${hostId ? 'NULL' : 'host_id'} AS host_id,
+               SUM(gpu_seconds)     AS gpu_seconds,
+               SUM(sm_gpu_seconds)  AS sm_gpu_seconds,
+               SUM(mem_mib_seconds) AS mem_mib_seconds,
+               MAX(peak_gpus)       AS peak_gpus,
+               MAX(peak_mem_mib)    AS peak_mem_mib,
+               SUM(samples)         AS samples
+        FROM usage_rollup
+        WHERE ${where.join(' AND ')}
+        GROUP BY bucket, username${hostId ? '' : ', host_id'}
+        ORDER BY bucket ASC`)
+      .all(...params);
+  }
+
+  /** Totals per user over a range -- the classic year-end table. */
+  queryUsageTotals({ fromTs, toTs, hostId = null }) {
+    const where = ['bucket_ts >= ?', 'bucket_ts < ?'];
+    const params = [fromTs, toTs];
+    if (hostId) {
+      where.push('host_id = ?');
+      params.push(hostId);
+    }
+    return this.db
+      .prepare(`
+        SELECT username,
+               SUM(gpu_seconds)     AS gpu_seconds,
+               SUM(sm_gpu_seconds)  AS sm_gpu_seconds,
+               SUM(mem_mib_seconds) AS mem_mib_seconds,
+               MAX(peak_gpus)       AS peak_gpus,
+               COUNT(DISTINCT host_id)  AS host_count,
+               MIN(bucket_ts)       AS first_seen,
+               MAX(bucket_ts)       AS last_seen
+        FROM usage_rollup
+        WHERE ${where.join(' AND ')}
+        GROUP BY username
+        ORDER BY gpu_seconds DESC`)
+      .all(...params);
+  }
+
+  /** Down-sampled GPU history for charts (bucketed average). */
+  queryGpuHistory(hostId, gpuIndex, fromTs, toTs, buckets = 120) {
+    const span = Math.max(1, toTs - fromTs);
+    const width = Math.max(1000, Math.floor(span / buckets));
+    return this.db
+      .prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
+               AVG(util_pct)     AS util_pct,
+               AVG(mem_used_mib) AS mem_used_mib,
+               AVG(temp_c)       AS temp_c,
+               AVG(power_w)      AS power_w
+        FROM gpu_sample
+        WHERE host_id = ? AND gpu_index = ? AND ts >= ? AND ts < ?
+        GROUP BY bucket ORDER BY bucket ASC`)
+      .all(width, width, hostId, gpuIndex, fromTs, toTs);
+  }
+
+  /** Down-sampled host history for charts. */
+  queryHostHistory(hostId, fromTs, toTs, buckets = 120) {
+    const span = Math.max(1, toTs - fromTs);
+    const width = Math.max(1000, Math.floor(span / buckets));
+    return this.db
+      .prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
+               AVG(cpu_pct)    AS cpu_pct,
+               AVG(mem_pct)    AS mem_pct,
+               AVG(load1)      AS load1
+        FROM host_sample
+        WHERE host_id = ? AND ts >= ? AND ts < ?
+        GROUP BY bucket ORDER BY bucket ASC`)
+      .all(width, width, hostId, fromTs, toTs);
+  }
+
+  queryEvents({ limit = 100, hostId = null } = {}) {
+    if (hostId) {
+      return this.db
+        .prepare('SELECT * FROM events WHERE host_id = ? ORDER BY ts DESC LIMIT ?')
+        .all(hostId, limit);
+    }
+    return this.db.prepare('SELECT * FROM events ORDER BY ts DESC LIMIT ?').all(limit);
+  }
+
+  /** Distinct users seen recently, for filter dropdowns. */
+  queryRecentUsers(sinceTs) {
+    return this.db
+      .prepare('SELECT DISTINCT username FROM proc_sample WHERE ts >= ? ORDER BY username')
+      .all(sinceTs)
+      .map((r) => r.username);
+  }
+
+  // ------------------------------------------------------------------ meta --
+
+  getMeta(key) {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    return row ? row.value : null;
+  }
+
+  setMeta(key, value) {
+    this.db
+      .prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+      .run(key, String(value));
+  }
+
+  close() {
+    this.db.close();
+  }
+}

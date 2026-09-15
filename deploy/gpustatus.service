@@ -1,0 +1,47 @@
+[Unit]
+Description=GPUStatus - multi-host GPU/CPU/memory monitoring dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as an unprivileged account whose SSH key is authorised on every monitored
+# host. Root is unnecessary: the remote probe only ever reads /proc, nvidia-smi
+# and ps.
+User=gpustatus
+Group=gpustatus
+WorkingDirectory=/opt/gpustatus
+# Adjust to the output of `command -v node` on the deployment machine.
+# /usr/bin/node is correct for a distro package; nvm installs live under
+# ~/.nvm/versions/node/<version>/bin/node (a system service should not depend on
+# a user's shell profile, so use the absolute path rather than relying on PATH).
+ExecStart=/usr/bin/node server/index.js
+
+# An unreachable GPU host is normal, expected input -- the collector reports it
+# as a red status light rather than crashing. So only restart on real failures.
+Restart=on-failure
+RestartSec=5
+
+# Give shutdown room to close SSE connections and the SQLite handle cleanly.
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+# ssh keeps its connection-multiplexing socket in /tmp; a private /tmp is fine
+# and keeps those sockets out of the host namespace.
+PrivateTmp=true
+
+# NOTE: ProtectSystem=strict / ProtectHome are deliberately NOT set here.
+# ssh writes ~/.ssh/known_hosts on the first connection to each host, so making
+# the home directory read-only breaks host-key learning ("accept-new") and the
+# service would fail to collect anything on a fresh deploy. If you want that
+# hardening, keep the key's directory writable, e.g.:
+#   ProtectSystem=strict
+#   ReadWritePaths=/opt/gpustatus/data /var/lib/gpustatus/.ssh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpustatus
+
+[Install]
+WantedBy=multi-user.target

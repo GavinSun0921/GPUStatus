@@ -1,0 +1,103 @@
+{
+  // ===========================================================================
+  //  GPUStatus configuration
+  //  JSON with comments (JSONC); trailing commas are allowed.
+  //
+  //  The admin page (/admin) regenerates this file on save, so hand-written
+  //  comments are replaced by these standard ones. A one-time backup is kept
+  //  next to it as hosts.json.bak.
+  //
+  //  Adding a machine requires NO action on that machine: the collector logs in
+  //  over SSH, runs a read-only shell probe, and the target stays untouched.
+  // ===========================================================================
+
+  // Name of this installation, shown in the page header. Leave empty to fall
+  // back to "GPUStatus".
+  "site": "MY-LAB",
+
+  "server": {
+    "port": 8787,
+    "bind": "0.0.0.0",
+    "web_dist": "web/dist"
+  },
+
+  "poll": {
+    "interval_ms": 15000,
+    "timeout_ms": 12000,
+    // No successful sample for this long => status turns YELLOW.
+    "stale_after_ms": 45000,
+    // This many consecutive failures => status turns RED.
+    "down_after_failures": 10
+  },
+
+  "ssh": {
+    "user": "",
+    "control_persist_s": 60,
+    "connect_timeout_s": 6,
+    "extra_options": []
+  },
+
+  "db": {
+    "path": "data/gpustatus.db",
+    "raw_retention_hours": 168
+  },
+
+  // Site-wide announcement shown above the dashboard. Multi-line body; bare
+  // http(s) links are turned into clickable links by the UI.
+  // Set "enabled": false (or clear the text) to hide it.
+  "announcement": {
+    "enabled": true,
+    "level": "info",
+    "title": "使用须知",
+    "body": "请使用绿色状态服务器,及时关注节点状态。\n使用手册:https://example.com/handbook"
+  },
+
+  // Friendly GPU names, keyed by the exact string nvidia-smi reports. Anything
+  // not listed falls back to a shortened form of the raw name.
+  "gpu_names": {"NVIDIA GeForce RTX 3090":"RTX 3090 (24G)","NVIDIA GeForce RTX 4090":"RTX 4090 (24G)","NVIDIA A100-SXM4-80GB":"A100 (80G)","NVIDIA L40":"L40 (48G)"},
+
+  // Mount points filtered out on every machine. "/" is the OS disk and
+  // "/boot/efi" is firmware; neither reflects whether a job can write data.
+  // Set to [] to report every local filesystem again.
+  "disk_exclude": ["/","/boot/efi"],
+
+  // Display names are derived from each machine's own hostname:
+  //   server19.example.com -> Server19
+  // Set an explicit "label" on a host to override this.
+  "naming": {
+    "strip_domain": true,
+    "capitalize": true
+  },
+
+  // Password for the admin page. Prefer "password_sha256"; generate it with:
+  //   node -e "console.log(require('crypto').createHash('sha256').update('你的密码').digest('hex'))"
+  //
+  // Leave BOTH unset to keep the admin page disabled. A placeholder default is
+  // deliberately NOT written: emitting "change-me" would quietly enable the page
+  // behind a publicly known password.
+  //
+  // The admin page cannot change this -- edit the file and restart, so a lost
+  // password is always recoverable without the UI.
+  "admin": {
+    "session_hours": 12
+  },
+
+  "hosts": [
+    {
+      "id": "gpu01",
+      "ssh": "gpu01",
+      "expect_gpus": 8,
+      // 网络挂载(NFS 等):只检查是否健康挂载,不统计容量
+      "net_mounts": ["/share"]
+    },
+    {
+      "id": "gpu02",
+      "ssh": "gpu02",
+      "expect_gpus": 8,
+      // 要统计展示的目录(在管理页勾选;不写这一项 = 显示全部自动发现项)
+      "disks": ["/home"],
+      // 网络挂载(NFS 等):只检查是否健康挂载,不统计容量
+      "net_mounts": ["/share"]
+    }
+  ]
+}

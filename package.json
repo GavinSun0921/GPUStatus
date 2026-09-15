@@ -1,0 +1,23 @@
+{
+  "name": "gpustatus",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Lightweight multi-host GPU/CPU/memory monitoring dashboard. Zero backend dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev:server": "node --watch server/index.js",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "typecheck": "npm --prefix web run typecheck",
+    "check:render": "npm --prefix web run check:render",
+    "test": "node --test",
+    "screenshot": "node tools/screenshot.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}

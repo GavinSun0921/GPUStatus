@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GPUStatus · GPU 集群监控</title>
+    <script>
+      // Apply the saved theme before the first paint, otherwise a dark-mode user
+      // gets a white flash while the bundle loads. Keep the key in sync with
+      // web/src/theme.ts.
+      (function () {
+        try {
+          var saved = localStorage.getItem('gpustatus:theme') || 'auto';
+          var dark =
+            saved === 'dark' ||
+            (saved === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var theme = dark ? 'dark' : 'light';
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

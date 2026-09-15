@@ -1,0 +1,25 @@
+{
+  "name": "gpustatus-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "check:render": "vite build --ssr src/ssr-check.tsx --outDir dist-ssr && node dist-ssr/ssr-check.js",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "antd": "^6.6.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.0"
+  }
+}

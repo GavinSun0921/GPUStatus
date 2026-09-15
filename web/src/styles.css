@@ -1,0 +1,95 @@
+/* ==========================================================================
+   GPUStatus — application-level layout only.
+
+   Component colours, spacing and the light/dark palettes all come from antd
+   (see ConfigProvider in App.tsx), so nothing here defines colours. This file
+   only positions the page shell and sets the maximum content width.
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+/* The page stays narrower than the viewport: a wide table is harder to read,
+   not easier, and full-bleed rows on an ultrawide monitor lose the eye. */
+.shell {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.content-inner {
+  padding-top: 16px;
+  padding-bottom: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* A stale or unreachable machine keeps its last known numbers on screen, but
+   they must not read as live. */
+.dimmed { opacity: 0.6; }
+
+/* Nested process tables sit inside an expanded row; antd already indents them,
+   this only keeps the second level visually quieter. */
+.ant-table-expanded-row .ant-table { font-size: 12.5px; }
+
+@media (max-width: 760px) {
+  .header-inner { flex-wrap: wrap; gap: 10px; }
+  .header-right { width: 100%; margin-left: 0; justify-content: space-between; }
+}
+
+/* ------------------------------------------------------- machine status -- */
+/* The node status indicator. Sized to be unmistakable at a glance: the light
+   used to be a bare 6px dot that was easy to miss entirely. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 11px 2px 9px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 19px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.status-pill-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* Only non-healthy states animate: a pulsing light should mean "look here". */
+.status-pill-live .status-pill-dot {
+  animation: status-blink 1.6s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* --------------------------------------------------------- expandable rows -- */
+/* A row that expands when clicked has to look clickable, otherwise the whole
+   interaction is hidden behind the small icon at the left. */
+.row-clickable {
+  cursor: pointer;
+}
