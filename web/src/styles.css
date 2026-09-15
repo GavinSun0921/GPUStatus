@@ -21,9 +21,25 @@
 .header-inner {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding-top: 9px;
-  padding-bottom: 9px;
+  /* Wraps rather than overflowing: on a narrow window the nav drops to its own
+     line instead of squeezing the brand. */
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* antd's Tabs assume they own a full-width row. Inline in the header they must
+   size to their content and not push the right-hand group off the edge. */
+.header-nav {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.header-nav .ant-tabs-nav {
+  margin: 0;
+}
+.header-nav .ant-tabs-nav::before {
+  border-bottom: none;
 }
 
 .header-right {

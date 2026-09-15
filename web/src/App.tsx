@@ -163,6 +163,18 @@ function Shell({
             )}
           </Space>
 
+          {/* Navigation sits on the SAME row as the brand: the header was two
+              rows, and the brand row had a lot of unused width while the tab row
+              had its own. `header-nav` keeps antd's Tabs from stretching and
+              from adding its usual bottom margin. */}
+          <Tabs
+            className="header-nav"
+            activeKey={tab}
+            onChange={(k) => setTab(k as Tab)}
+            items={TABS.map((t) => ({ key: t.key, label: t.label }))}
+            tabBarStyle={{ marginBottom: 0 }}
+          />
+
           <div className="header-right">
             {snapshot && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -178,15 +190,6 @@ function Shell({
               options={THEME_OPTIONS}
             />
           </div>
-        </div>
-
-        <div className="shell">
-          <Tabs
-            activeKey={tab}
-            onChange={(k) => setTab(k as Tab)}
-            items={TABS.map((t) => ({ key: t.key, label: t.label }))}
-            tabBarStyle={{ marginBottom: 0 }}
-          />
         </div>
       </Layout.Header>
 
