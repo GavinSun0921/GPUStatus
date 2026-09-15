@@ -162,6 +162,14 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
       powerW: num(g.power_w),
       fanPct: num(g.fan_pct),
       nProcs: procsPerGpu.get(num(g.index)) ?? 0,
+      // Health telemetry. Kept as raw values here; interpreting the throttle
+      // bitmask belongs to State, which is also where the operator-facing
+      // wording lives.
+      throttleMask: num(g.throttle),
+      smClockMhz: num(g.sm_clock_mhz),
+      smClockMaxMhz: num(g.sm_clock_max_mhz),
+      powerLimitW: num(g.power_limit_w),
+      pstate: g.pstate && g.pstate !== 'null' ? String(g.pstate) : null,
     }))
     .sort((a, b) => a.index - b.index);
 

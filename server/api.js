@@ -496,6 +496,22 @@ export function createApi(app) {
         return true;
       }
 
+      case '/api/history/machine': {
+        const hostId = searchParams.get('host');
+        if (!hostId) {
+          json(res, 400, { error: 'host parameter is required' });
+          return true;
+        }
+        const { from, to } = resolveWindow(searchParams, 6 * HOUR_MS);
+        json(res, 200, {
+          host: hostId,
+          from,
+          to,
+          points: db.queryMachineHistory(hostId, from, to),
+        });
+        return true;
+      }
+
       case '/api/history/host': {
         const hostId = searchParams.get('host');
         if (!hostId) {

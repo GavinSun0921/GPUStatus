@@ -121,8 +121,33 @@ export class Db {
     this.db.exec('PRAGMA foreign_keys = ON');
 
     this.#migrate();
+    this.#addColumns();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
+  }
+
+  /**
+   * Add columns that were introduced after a database was first created.
+   *
+   * `CREATE TABLE IF NOT EXISTS` in #migrate() only helps a brand new file;
+   * an existing deployment already has the table, so new columns have to be
+   * added explicitly. SQLite has no "ADD COLUMN IF NOT EXISTS", hence the
+   * pragma check. Existing rows get NULL for the new columns, which is the
+   * honest value: those samples were taken before the metric was collected.
+   */
+  #addColumns() {
+    const additions = [
+      ['gpu_sample', 'throttle_mask', 'INTEGER'],
+      ['gpu_sample', 'sm_clock_mhz', 'REAL'],
+      ['gpu_sample', 'sm_clock_max_mhz', 'REAL'],
+      ['gpu_sample', 'power_limit_w', 'REAL'],
+      ['gpu_sample', 'pstate', 'TEXT'],
+    ];
+    for (const [table, column, type] of additions) {
+      const existing = this.db.prepare(`PRAGMA table_info(${table})`).all();
+      if (existing.some((c) => c.name === column)) continue;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   #migrate() {
@@ -181,7 +206,18 @@ export class Db {
         temp_c       REAL,
         power_w      REAL,
         fan_pct      REAL,
-        n_procs      INTEGER
+        n_procs      INTEGER,
+        -- Health telemetry. throttle_mask is nvidia-smi's
+        -- clocks_throttle_reasons bitmask (see THROTTLE_REASONS in state.js).
+        -- NULL means the card did not report a value -- deliberately not 0,
+        -- which would read as "not throttled" for a reading we never got.
+        -- (No backticks in this comment: the whole schema is a JS template
+        --  literal, and a backtick here would terminate it.)
+        throttle_mask    INTEGER,
+        sm_clock_mhz     REAL,
+        sm_clock_max_mhz REAL,
+        power_limit_w    REAL,
+        pstate           TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_gpu_sample_ts ON gpu_sample(host_id, ts);
       CREATE INDEX IF NOT EXISTS idx_gpu_sample_uuid ON gpu_sample(gpu_uuid, ts);
@@ -256,8 +292,9 @@ export class Db {
 
       insGpuSample: this.db.prepare(`
         INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
-          mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+          mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
+          throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 
       insProcSample: this.db.prepare(`
         INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username,
@@ -352,6 +389,8 @@ export class Db {
           ts, hostId, n(g.index), s(g.uuid), s(g.name), n(g.util),
           n(g.memUsedMib), n(g.memTotalMib), n(g.memUtil), n(g.tempC), n(g.powerW),
           n(g.fanPct), n(g.nProcs),
+          n(g.throttleMask), n(g.smClockMhz), n(g.smClockMaxMhz), n(g.powerLimitW),
+          s(g.pstate),
         );
       }
 
@@ -486,6 +525,60 @@ export class Db {
         WHERE host_id = ? AND gpu_index = ? AND ts >= ? AND ts < ?
         GROUP BY bucket ORDER BY bucket ASC`)
       .all(width, width, hostId, gpuIndex, fromTs, toTs);
+  }
+
+  /**
+   * Down-sampled history for ONE machine, with the GPU figures folded in.
+   *
+   * Two queries rather than a SQL join: gpu_sample holds one row per card per
+   * tick, so it has to be reduced to one row per bucket before it can be joined
+   * to host_sample, and doing that in SQL would need a nested aggregate that is
+   * far harder to read than merging two small arrays here.
+   *
+   * Temperature is a MAX (the hottest card is the interesting one); power is a
+   * SUM (whole-machine draw); utilisation and memory are averages across cards.
+   */
+  queryMachineHistory(hostId, fromTs, toTs, buckets = 120) {
+    const span = Math.max(1, toTs - fromTs);
+    const width = Math.max(1000, Math.floor(span / buckets));
+
+    const host = this.db
+      .prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
+               AVG(cpu_pct)  AS cpu_pct,
+               AVG(mem_pct)  AS mem_pct,
+               AVG(load1)    AS load1
+        FROM host_sample
+        WHERE host_id = ? AND ts >= ? AND ts < ?
+        GROUP BY bucket ORDER BY bucket ASC`)
+      .all(width, width, hostId, fromTs, toTs);
+
+    const gpu = this.db
+      .prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
+               AVG(util_pct)                          AS gpu_util,
+               AVG(mem_used_mib)                      AS mem_used,
+               AVG(CASE WHEN mem_total_mib > 0 THEN mem_total_mib END) AS mem_total,
+               MAX(temp_c)                            AS temp_c,
+               SUM(power_w)                           AS power_w
+        FROM gpu_sample
+        WHERE host_id = ? AND ts >= ? AND ts < ?
+        GROUP BY bucket ORDER BY bucket ASC`)
+      .all(width, width, hostId, fromTs, toTs);
+
+    const byBucket = new Map();
+    for (const r of host) byBucket.set(r.bucket, { bucket: r.bucket, ...r });
+    for (const r of gpu) {
+      const point = byBucket.get(r.bucket) ?? { bucket: r.bucket };
+      point.gpu_util = r.gpu_util;
+      point.gpu_mem_pct =
+        r.mem_used !== null && r.mem_total ? (r.mem_used / r.mem_total) * 100 : null;
+      point.temp_c = r.temp_c;
+      point.power_w = r.power_w;
+      byBucket.set(r.bucket, point);
+    }
+
+    return [...byBucket.values()].sort((a, b) => a.bucket - b.bucket);
   }
 
   /** Down-sampled host history for charts. */

@@ -160,6 +160,8 @@ const CONTRACT: Record<string, string[]> = {
   gpu: [
     'index', 'uuid', 'name', 'display_name', 'util', 'mem_used_mib', 'mem_total_mib',
     'mem_pct', 'temp_c', 'power_w', 'fan_pct', 'n_procs', 'procs',
+    'throttle_mask', 'throttle_reasons', 'throttled', 'sm_clock_mhz',
+    'sm_clock_max_mhz', 'power_limit_w', 'pstate',
   ],
   gpu_proc: ['pid', 'username', 'name', 'used_mem_mib', 'sm_pct'],
   host_user: ['username', 'gpu_count', 'gpus', 'mem_mib', 'proc_count', 'sm_pct_avg', 'sm_pct_sum', 'procs'],
@@ -270,6 +272,13 @@ const card = (
   fan_pct: 30,
   n_procs: 0,
   procs: [],
+  throttle_mask: 0,
+  throttle_reasons: [],
+  throttled: false,
+  sm_clock_mhz: 2500,
+  sm_clock_max_mhz: 2520,
+  power_limit_w: 450,
+  pstate: 'P0',
   ...overrides,
 });
 
@@ -289,7 +298,7 @@ const sharedCard = card(1, {
 
 const synthetic: Snapshot = {
   ...snapshot,
-  summary: { ...snapshot.summary, hosts_total: 1, hosts_ok: 1, gpus_total: 3 },
+  summary: { ...snapshot.summary, hosts_total: 1, hosts_ok: 1, gpus_total: 4 },
   users: [],
   hosts: [
     {
@@ -297,9 +306,11 @@ const synthetic: Snapshot = {
       id: 'synthetic',
       label: 'Synthetic',
       hostname: 'synthetic.invalid',
-      expect_gpus: 3,
+      expect_gpus: 4,
       status: 'ok',
-      warnings: [],
+      // The exact code Server19 produced when five of its eight cards were in
+      // thermal slowdown. It must reach the card as Chinese, not as a raw code.
+      warnings: ['throttled:5/8_thermal'],
       users: [],
       gpus: [
         card(0, {}), // idle
@@ -311,6 +322,25 @@ const synthetic: Snapshot = {
           mem_pct: 0.4,
           n_procs: 1,
           procs: [{ pid: 444444, username: null, name: 'unknown', used_mem_mib: 100, sm_pct: null }],
+        }),
+        card(3, {
+          // thermally throttled at 100% utilisation -- the case the whole
+          // health-telemetry change exists for, and the one an operator cannot
+          // spot from utilisation or temperature alone
+          util: 100,
+          mem_used_mib: 40000,
+          mem_pct: 83,
+          temp_c: 87,
+          power_w: 260,
+          n_procs: 1,
+          procs: [
+            { pid: 555555, username: 'dave', name: 'python train.py', used_mem_mib: 40000, sm_pct: 98 },
+          ],
+          throttle_mask: 0x20,
+          throttle_reasons: ['热降频'],
+          throttled: true,
+          sm_clock_mhz: 765,
+          sm_clock_max_mhz: 3105,
         }),
       ],
     },
@@ -337,9 +367,18 @@ const edgeChecks: [boolean, string][] = [
     'a card shared by three processes does not show all three PIDs',
   ],
   [edgeHtml.includes('alice@111111'), 'process chip is not in user@pid form'],
+  // The throttled card must be marked. Without this the card reads as a healthy
+  // 100%-utilisation GPU, which is exactly the failure mode that hid Server19's
+  // thermal throttling.
+  [countOf('throttle-tag', edgeHtml) === 1, 'throttled card is not marked'],
+  // warningLabel() must translate the code; a raw "throttled:5/8_thermal" on
+  // screen would be unreadable to the person on duty.
+  [edgeHtml.includes('5/8 张卡热降频'), 'throttle warning is not rendered in Chinese'],
+  [!edgeHtml.includes('throttled:5/8_thermal'), 'raw throttle code leaked into the UI'],
+  [edgeHtml.includes('降频'), 'throttle tag has no text'],
   [edgeHtml.includes('未知用户'), 'unresolved process owner is not labelled'],
   [
-    countOf('gpu-row', edgeHtml) === 3,
+    countOf('gpu-row', edgeHtml) === 4,
     `edge case rendered ${countOf('gpu-row', edgeHtml)} rows, expected 3 (one per card)`,
   ],
   [!edgeHtml.includes('undefined') && !edgeHtml.includes('NaN'), 'edge markup contains undefined/NaN'],

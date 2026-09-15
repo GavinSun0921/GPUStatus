@@ -67,7 +67,23 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   err "nvidia_smi_not_installed"
   NVIDIA_ERR="nvidia-smi not found in PATH"
 else
-  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed'
+  # NOTE ON FIELD ORDER: the parser below reads the trailing fields by position
+  # (f[n], f[n-1], ...) because the model name may itself contain commas. Adding
+  # fields means appending here AND shifting the indices there.
+  #
+  # The last five are health telemetry, not performance:
+  #   clocks_throttle_reasons.active  bitmask -- is the card being slowed down
+  #   clocks.current.sm / max.sm      to express that slowdown as a ratio
+  #   power.limit                     to tell "using 285W" from "capped at 285W"
+  #   pstate                          P0 = full performance, P2/P8 = idle states
+  #
+  # Verified on all six machines (drivers 580.173.02 .. 610.57.04) that every one
+  # of these fields is queryable. That mattered: an unsupported field name makes
+  # nvidia-smi reject the WHOLE query, which would have blanked the entire table.
+  #
+  # Cost of the five extra fields: measured 0.11s -> 0.12s per poll, no new
+  # process and no extra NVML initialisation -- they ride along on this call.
+  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed,clocks_throttle_reasons.active,clocks.current.sm,clocks.max.sm,power.limit,pstate'
 
   # !! nvidia-smi prints NVML failures to STDOUT while exiting non-zero, so the
   # exit code must be honoured -- otherwise the error text would be parsed as a
@@ -336,6 +352,29 @@ function num(v,   s) {
 }
 function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
 
+# Throttle reasons come as a hex bitmask ("0x0000000000000020").
+#
+# Parsed by hand rather than with strtonum(): that is a GNU awk extension, and
+# this probe is meant to run on any machine with sh + coreutils + nvidia-smi.
+# All six current hosts happen to ship gawk, but one added later with mawk would
+# abort the whole GPU section on an undefined function.
+#
+# Anything that is not a 0x-prefixed hex string becomes null rather than 0:
+# "cannot tell" and "not throttled" are different answers, and defaulting to 0
+# would silently report a healthy card for a reading we never got.
+function hexnum(v,   s, i, c, d, n) {
+  s = trim(v)
+  if (s !~ /^0[xX][0-9a-fA-F]+$/) return "null"
+  s = substr(s, 3)
+  n = 0
+  for (i = 1; i <= length(s); i++) {
+    d = index("0123456789abcdef", tolower(substr(s, i, 1))) - 1
+    if (d < 0) return "null"
+    n = n * 16 + d
+  }
+  return n
+}
+
 function join(f, from, to,   i, out, sep) {
   out = ""; sep = ""
   for (i = from; i <= to; i++) { out = out sep f[i]; sep = "," }
@@ -438,18 +477,26 @@ section == "NETMOUNT" {
 section == "GPU" {
   if ($0 == "") next
   n = split($0, f, ",")
-  if (n < 10) next
+  # 15 fields now; below this the trailing-index reads would silently misalign.
+  if (n < 15) next
   k = ++ngpu
   gpu_index[k] = num(f[1])
   gpu_uuid[k]  = trim(f[2])
-  gpu_name[k]  = trim(join(f, 3, n - 7))
-  gpu_util[k]  = num(f[n - 6])
-  gpu_memused[k] = num(f[n - 5])
-  gpu_memtotal[k] = num(f[n - 4])
-  gpu_temp[k]  = num(f[n - 3])
-  gpu_power[k] = num(f[n - 2])
-  gpu_memutil[k] = num(f[n - 1])
-  gpu_fan[k]   = num(f[n])
+  gpu_name[k]  = trim(join(f, 3, n - 12))
+  gpu_util[k]  = num(f[n - 11])
+  gpu_memused[k] = num(f[n - 10])
+  gpu_memtotal[k] = num(f[n - 9])
+  gpu_temp[k]  = num(f[n - 8])
+  gpu_power[k] = num(f[n - 7])
+  gpu_memutil[k] = num(f[n - 6])
+  gpu_fan[k]   = num(f[n - 5])
+  # Throttle bitmask arrives as hex (0x0000000000000020); strtonum needs the
+  # leading 0x, and a non-numeric value must not become 0 ("not throttled").
+  gpu_throttle[k] = hexnum(trim(f[n - 4]))
+  gpu_smclock[k]  = num(f[n - 3])
+  gpu_smclockmax[k] = num(f[n - 2])
+  gpu_powerlimit[k] = num(f[n - 1])
+  gpu_pstate[k] = trim(f[n])
   next
 }
 
@@ -525,9 +572,10 @@ END {
 
   printf "  \"gpus\": ["
   for (i = 1; i <= ngpu; i++) {
-    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s}",
+    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s, \"throttle\": %s, \"sm_clock_mhz\": %s, \"sm_clock_max_mhz\": %s, \"power_limit_w\": %s, \"pstate\": %s}",
       (i > 1 ? "," : ""), gpu_index[i], str(gpu_uuid[i]), str(gpu_name[i]), gpu_util[i],
-      gpu_memused[i], gpu_memtotal[i], gpu_memutil[i], gpu_temp[i], gpu_power[i], gpu_fan[i]
+      gpu_memused[i], gpu_memtotal[i], gpu_memutil[i], gpu_temp[i], gpu_power[i], gpu_fan[i],
+      gpu_throttle[i], gpu_smclock[i], gpu_smclockmax[i], gpu_powerlimit[i], str(gpu_pstate[i])
   }
   printf "%s  ],\n", (ngpu > 0 ? "\n" : "")
 

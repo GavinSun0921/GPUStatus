@@ -53,15 +53,38 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
     {
       title: '型号',
       dataIndex: 'display_name',
-      width: 168,
-      render: (name: string | null) =>
-        name ? (
-          <Typography.Text className="cell-model" style={{ fontSize: 13 }}>
-            {name}
-          </Typography.Text>
-        ) : (
-          <Typography.Text type="secondary">—</Typography.Text>
-        ),
+      width: 188,
+      render: (name: string | null, gpu: Gpu) => (
+        <Space size={6} align="center">
+          {name ? (
+            <Typography.Text className="cell-model" style={{ fontSize: 13 }}>
+              {name}
+            </Typography.Text>
+          ) : (
+            <Typography.Text type="secondary">—</Typography.Text>
+          )}
+          {/* A throttled card reports 100% utilisation at a sane temperature and
+              is nonetheless slow. This tag is the only thing on the row that
+              says so, so it carries the clock ratio too. */}
+          {gpu.throttled && (
+            <Tooltip
+              title={[
+                gpu.throttle_reasons.join(' · ') || '降频',
+                gpu.sm_clock_mhz !== null && gpu.sm_clock_max_mhz
+                  ? `SM ${Math.round(gpu.sm_clock_mhz)} / ${Math.round(gpu.sm_clock_max_mhz)} MHz`
+                  : null,
+                gpu.power_limit_w !== null ? `功耗上限 ${Math.round(gpu.power_limit_w)} W` : null,
+              ]
+                .filter(Boolean)
+                .join('\n')}
+            >
+              <Tag className="throttle-tag" color="warning" style={{ margin: 0, fontSize: 11 }}>
+                ⚠ 降频
+              </Tag>
+            </Tooltip>
+          )}
+        </Space>
+      ),
     },
     {
       // Deliberately presented as a raw instantaneous reading rather than as a

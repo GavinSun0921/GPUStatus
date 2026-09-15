@@ -553,6 +553,53 @@ node -e "console.log(require('crypto').createHash('sha256').update('你的密码
 
 ---
 
+### 显卡健康:降频检测
+
+只看利用率会漏掉一类问题:**卡在 100% 利用率、温度也不算离谱,但实际只跑出三成速度。**
+
+`nvidia-smi` 的 `clocks_throttle_reasons.active` 是一个位掩码,我们直接解出来:
+
+| 位 | 含义 | 是否算问题 |
+|---|---|---|
+| `0x001` | 空闲(GpuIdle) | **否** —— 空闲卡本来就降频 |
+| `0x002` | 应用时钟限制 | 否 |
+| `0x004` | 功耗墙 | 是(但满载撞功耗墙是正常配置) |
+| `0x008` `0x040` `0x080` | 硬件降频 / 热降频 | 是 |
+| `0x010` `0x100` | 同步加速 / 显示时钟 | 否 |
+| `0x020` | **热降频** | 是 |
+
+- 单个卡:型号旁出现 `⚠ 降频` 标签,悬停显示原因、`SM 时钟/最高时钟`、功耗上限
+- 整机:标题下出现告警行,例如 `5/8 张卡热降频`
+- **空闲的卡不报警** —— 判据是"有降频位 **且** 卡不空闲",否则每台没人用的机器都会告警
+- 掩码读不到时存 `NULL` 而不是 `0`:"读不到"和"没降频"是两回事
+
+采集这 5 个字段(降频掩码、SM 时钟、最高时钟、功耗上限、pstate)**不增加任何进程** ——
+它们搭在原有那次 `--query-gpu` 上,实测 0.11s → 0.12s。
+
+> 实际发现的例子:Server19 有 5 张卡处于热降频,SM 时钟 930 MHz / 最高 3105 MHz,
+> 风扇已 100% 仍压不住,累计热降频时长达 46 小时 —— 而只看看板上的利用率,它是满绿的。
+
+### 历史曲线 `/history`
+
+选机器 + 选时段(1 小时 / 6 小时 / 24 小时 / 3 天),看利用率、占用比例、温度、功耗的趋势。
+数据本来就为用量统计存着,这个页面只是把它画出来。
+
+窗口受 `db.raw_retention_hours`(默认 168 小时)限制,更早的只剩按小时的用量汇总。
+
+**图表库选了 recharts**,但依据不是体积,而是**运行开销** —— 大屏一开就是几周,持续吃 CPU 才是真问题。
+用 CDP 的 `Performance.getMetrics` 实测同一页面 30 秒窗口内的渲染进程 CPU 时间:
+
+| 方案 | CPU / 30s | 单核占用 | 打包体积 |
+|---|---|---|---|
+| 无图表库(对照) | 0.11s | 0.37% | — |
+| **recharts** | **0.21s** | **0.70%** | 453 KB gzip |
+| @ant-design/plots | 2.38s | **7.9%** | 780 KB gzip |
+
+`@ant-design/plots` 是 antd 的配套库、样式最统一,但常驻开销是 recharts 的 **11 倍**
+(相对无图表的基准是 21 倍),所以没有采用。复测两次,数值稳定在 ±0.3 个百分点内。
+
+---
+
 ### 主题:自动 / 亮 / 暗
 
 右上角三态切换,**默认"自动"跟随系统**(`prefers-color-scheme`),
@@ -785,7 +832,8 @@ GPUStatus/
 ├── web/                       # React + Vite + TypeScript 前端
 │   ├── src/
 │   │   ├── {api,format,types,theme}.ts, App.tsx, main.tsx, styles.css
-│   │   ├── components/        # Machine / Overview / Reports / AdminView
+│   │   ├── components/
+│   │   ├── HistoryView.tsx        # Machine / Overview / Reports / AdminView
 │   │   └── ssr-check.tsx      # 渲染冒烟测试(npm run check:render)
 │   └── test/theme.test.js     # 主题与 CSS 变量不变量测试(npm test)
 ├── tools/screenshot.mjs       # 截图工具(npm run screenshot)

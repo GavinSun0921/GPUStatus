@@ -31,6 +31,16 @@ export interface Gpu {
   temp_c: number | null;
   power_w: number | null;
   fan_pct: number | null;
+  /** nvidia-smi clocks_throttle_reasons bitmask; null if not reported */
+  throttle_mask: number | null;
+  /** decoded reason names, e.g. ['热降频'] */
+  throttle_reasons: string[];
+  /** true only when a performance-costing reason is active on a non-idle card */
+  throttled: boolean;
+  sm_clock_mhz: number | null;
+  sm_clock_max_mhz: number | null;
+  power_limit_w: number | null;
+  pstate: string | null;
   n_procs: number;
   procs: GpuProc[];
 }

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { aggregateUserUsage } from '../db.js';
-import { State, displayGpuName } from '../state.js';
+import { State, decodeThrottle, displayGpuName, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
 import { createHash } from 'node:crypto';
@@ -1020,4 +1020,63 @@ test('saving from the admin page keeps every editable per-host field', () => {
       `saveConfig does not map "${key}" -- a save would silently reset it`,
     );
   }
+});
+
+// ------------------------------------------------------ throttle telemetry --
+
+test('the throttle bitmask decodes to the reasons an operator acts on', () => {
+  const busy = { idle: false };
+
+  // Observed live on Server20: no bits set, card at full clock.
+  assert.deepEqual(decodeThrottle(0x0, busy), { mask: 0, reasons: [], throttled: false });
+  // Observed live on Server14/18 at full utilisation.
+  assert.deepEqual(decodeThrottle(0x4, busy).reasons, ['功耗墙']);
+  assert.equal(decodeThrottle(0x4, busy).throttled, true);
+  // Observed live on Server19 GPU1/2/3/5/6 -- running at 930 MHz of 3105.
+  assert.deepEqual(decodeThrottle(0x20, busy).reasons, ['热降频']);
+  assert.equal(decodeThrottle(0x20, busy).throttled, true);
+  // Several reasons at once is normal.
+  assert.deepEqual(decodeThrottle(0x24, busy).reasons, ['功耗墙', '热降频']);
+
+  // An idle card downclocks by design: the GpuIdle bit is not a fault, and a
+  // machine that is simply not being used must not raise a throttle warning.
+  assert.equal(decodeThrottle(0x1, { idle: true }).throttled, false);
+  assert.deepEqual(decodeThrottle(0x1, busy).reasons, ['空闲']);
+  assert.equal(decodeThrottle(0x1, busy).throttled, false);
+
+  // A card with work queued that reports idle is still not a throttle problem.
+  assert.equal(decodeThrottle(0x1 | 0x20, { idle: true }).throttled, false);
+  assert.equal(decodeThrottle(0x1 | 0x20, busy).throttled, true);
+});
+
+test('an unreadable throttle mask is null, never a silent "not throttled"', () => {
+  // Cards that do not report the field (older drivers) must be distinguishable
+  // from cards that positively reported "no throttling".
+  for (const missing of [null, undefined, NaN, 'nonsense']) {
+    const d = decodeThrottle(missing, { idle: false });
+    assert.equal(d.mask, null, `mask for ${String(missing)} should be null`);
+    assert.equal(d.throttled, false);
+    assert.deepEqual(d.reasons, []);
+  }
+});
+
+test('throttle warnings separate thermal from power capping', () => {
+  const gpus = (masks) =>
+    masks.map((m, i) => ({ index: i, throttleMask: m, nProcs: 1, util: 99 }));
+
+  // Idle cards raise nothing, however many there are.
+  assert.deepEqual(throttleWarnings({ gpus: gpus([1, 1, 1, 1]) }), []);
+  // The Server19 case: five thermal, three power-capped.
+  assert.deepEqual(throttleWarnings({ gpus: gpus([0x20, 0x20, 0x20, 0x4, 0x4, 0x20, 0x20, 0x4]) }), [
+    'throttled:5/8_thermal',
+    'throttled:3/8_power_cap',
+  ]);
+  // A power cap at full utilisation is the card behaving as configured, so it
+  // is reported but never counted as thermal.
+  assert.deepEqual(throttleWarnings({ gpus: gpus([4, 4]) }), ['throttled:2/2_power_cap']);
+  assert.deepEqual(throttleWarnings({ gpus: gpus([0, 0]) }), []);
+  // Cards that never reported a mask contribute nothing rather than a false 0.
+  assert.deepEqual(throttleWarnings({ gpus: gpus([null, null]) }), []);
+  assert.deepEqual(throttleWarnings(null), []);
+  assert.deepEqual(throttleWarnings({ gpus: [] }), []);
 });

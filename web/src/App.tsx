@@ -6,6 +6,7 @@ import { useSnapshot } from './api';
 import { useTheme, type ThemeMode } from './theme';
 import { Overview } from './components/Overview';
 import { EventsView, UsageView, UsersView } from './components/Reports';
+import { HistoryView } from './components/HistoryView';
 import { AdminView } from './components/AdminView';
 import { ago } from './format';
 
@@ -57,11 +58,12 @@ class ViewErrorBoundary extends Component<
   }
 }
 
-type Tab = 'overview' | 'users' | 'usage' | 'events' | 'admin';
+type Tab = 'overview' | 'users' | 'history' | 'usage' | 'events' | 'admin';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: '总览' },
   { key: 'users', label: '用户' },
+  { key: 'history', label: '历史' },
   { key: 'usage', label: '用量' },
   { key: 'events', label: '事件' },
   { key: 'admin', label: '管理' },
@@ -206,6 +208,7 @@ function Shell({
           <ViewErrorBoundary key={tab} view={TABS.find((t) => t.key === tab)?.label ?? tab}>
             {snapshot && tab === 'overview' && <Overview snapshot={snapshot} now={now} />}
             {snapshot && tab === 'users' && <UsersView snapshot={snapshot} />}
+            {tab === 'history' && <HistoryView snapshot={snapshot} />}
             {snapshot && tab === 'usage' && <UsageView />}
             {snapshot && tab === 'events' && <EventsView />}
             {tab === 'admin' && <AdminView snapshot={snapshot} />}

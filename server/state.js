@@ -40,6 +40,71 @@ export function displayGpuName(rawName, gpuNames) {
     .trim();
 }
 
+/**
+ * nvidia-smi's clocks_throttle_reasons bitmask.
+ *
+ * `bad` marks the reasons that mean the card is delivering less than it should
+ * WHILE IT HAS WORK TO DO. GpuIdle is deliberately not bad: an idle card
+ * downclocks by design, and flagging that would light up every quiet machine.
+ * The rest of the hardware reasons are grouped under one label because the
+ * operator's next step is the same for all of them -- go and look at the card.
+ */
+export const THROTTLE_REASONS = [
+  { bit: 0x001, label: '空闲', bad: false },
+  { bit: 0x002, label: '应用时钟限制', bad: false },
+  { bit: 0x004, label: '功耗墙', bad: true },
+  { bit: 0x008, label: '硬件降频', bad: true },
+  { bit: 0x010, label: '同步加速', bad: false },
+  { bit: 0x020, label: '热降频', bad: true },
+  { bit: 0x040, label: '硬件热降频', bad: true },
+  { bit: 0x080, label: '硬件功率制动', bad: true },
+  { bit: 0x100, label: '显示时钟限制', bad: false },
+];
+
+/**
+ * Decode a throttle bitmask into `{ mask, reasons, throttled }`.
+ *
+ * `throttled` is true only for a reason that actually costs performance, and
+ * only when the card is NOT idle -- a card sitting at P8 with the GpuIdle bit
+ * set is doing exactly what it should.
+ */
+export function decodeThrottle(mask, { idle = false } = {}) {
+  if (mask === null || mask === undefined || !Number.isFinite(mask)) {
+    return { mask: null, reasons: [], throttled: false };
+  }
+  const reasons = THROTTLE_REASONS.filter((r) => (mask & r.bit) !== 0).map((r) => r.label);
+  const bad = THROTTLE_REASONS.filter((r) => r.bad && (mask & r.bit) !== 0);
+  return { mask, reasons, throttled: bad.length > 0 && !idle };
+}
+
+/**
+ * One warning entry when any card on a host is throttled for a reason that
+ * costs performance, e.g. "throttled:5/8_thermal".
+ *
+ * Reasons are reduced to a short set: an operator needs to know how many cards
+ * and roughly why, then goes to look.
+ */
+export function throttleWarnings(sample) {
+  if (!sample || !Array.isArray(sample.gpus) || sample.gpus.length === 0) return [];
+
+  const hot = [];
+  const power = [];
+  for (const g of sample.gpus) {
+    const idle = g.nProcs === 0 && (g.util === null || g.util < 5);
+    const { mask } = decodeThrottle(g.throttleMask, { idle });
+    if (mask === null) continue;
+    if ((mask & 0x020) !== 0 || (mask & 0x040) !== 0) hot.push(g.index);
+    else if ((mask & 0x004) !== 0) power.push(g.index);
+  }
+
+  const out = [];
+  // Thermal first: it is a cooling problem someone can act on, whereas a power
+  // cap at full utilisation is the card behaving as configured.
+  if (hot.length > 0) out.push(`throttled:${hot.length}/${sample.gpus.length}_thermal`);
+  if (power.length > 0) out.push(`throttled:${power.length}/${sample.gpus.length}_power_cap`);
+  return out;
+}
+
 export const STATUS = {
   UNKNOWN: 'unknown',
   OK: 'ok',
@@ -319,6 +384,7 @@ export class State {
   }
 
   #hostView(entry, now) {
+    // (see throttleWarnings below)
     const h = entry.host;
     const latest = entry.latest;
     const ageMs = entry.lastOk === null ? null : now - entry.lastOk;
@@ -341,7 +407,13 @@ export class State {
       poll_duration_ms: entry.durationMs,
       total_polls: entry.totalPolls,
       total_failures: entry.totalFailures,
-      warnings: entry.lastWarnings,
+      // Probe-reported warnings plus one derived here: a card that is being
+      // throttled is healthy by every metric the probe reports -- it can sit at
+      // 100% utilisation and a sane temperature while running at a third of its
+      // clock. Without this the machine looks "正常" while delivering a fraction
+      // of its performance. (Found exactly that on Server19: 5 of 8 cards in
+      // thermal slowdown at 930 MHz against a 3105 MHz maximum.)
+      warnings: [...entry.lastWarnings, ...throttleWarnings(latest)],
       stale: latest === null,
 
       hostname: latest?.hostname ?? null,
@@ -423,6 +495,19 @@ export class State {
         power_w: g.powerW,
         fan_pct: g.fanPct,
         n_procs: g.nProcs,
+        // Health telemetry. `throttled` is the bit a duty operator needs to
+        // see; `throttle_reasons` explains it on hover.
+        throttle_mask: g.throttleMask ?? null,
+        throttle_reasons: decodeThrottle(g.throttleMask, {
+          idle: g.nProcs === 0 && (g.util === null || g.util < 5),
+        }).reasons,
+        throttled: decodeThrottle(g.throttleMask, {
+          idle: g.nProcs === 0 && (g.util === null || g.util < 5),
+        }).throttled,
+        sm_clock_mhz: g.smClockMhz ?? null,
+        sm_clock_max_mhz: g.smClockMaxMhz ?? null,
+        power_limit_w: g.powerLimitW ?? null,
+        pstate: g.pstate ?? null,
         procs: latest.procs
           .filter((p) => p.gpuIndex === g.index)
           .map((p) => ({
