@@ -11,7 +11,7 @@
  */
 
 import { createServer } from 'node:http';
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { watch, createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { loadConfig, resolveHostLabel } from './config.js';
@@ -123,6 +123,40 @@ function applyConfig(next) {
   );
 
   state.notify('config');
+}
+
+/**
+ * Reload the config file when it changes on disk.
+ *
+ * Without this, editing `config/hosts.json` meant `sudo systemctl restart`
+ * every time -- which is real friction for the two most common edits: adding a
+ * machine and setting the admin password. The admin page already reloads on
+ * save; this covers editing the file by hand.
+ *
+ * A broken edit must NOT take the dashboard down: the parse error is logged,
+ * the previous configuration stays in force, and the next save is tried again.
+ * Editors write in several steps (truncate, then write), so this is debounced.
+ */
+function watchConfig() {
+  const path = app.config.configPath;
+  let timer = null;
+  try {
+    watch(path, () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          const next = loadConfig(path);
+          applyConfig(next);
+        } catch (err) {
+          log(`config reload FAILED (keeping the previous config): ${err.message}`);
+        }
+      }, 400);
+    });
+    log(`watching      ${path} for changes`);
+  } catch (err) {
+    // Watching is a convenience; a failure here must not stop the service.
+    log(`could not watch ${path}: ${err.message}`);
+  }
 }
 
 // Status transitions are reported from exactly one place, so the event log
@@ -377,6 +411,8 @@ if (args.once) {
 server.listen(config.server.port, config.server.bind, () => {
   log(`listening     http://${config.server.bind}:${config.server.port}`);
   log(`frontend      ${existsSync(join(webDist, 'index.html')) ? webDist : '(not built - API only)'}`);
+  // After listen, so a watch failure cannot stop the service from starting.
+  watchConfig();
 });
 
 if (args.poll) {
