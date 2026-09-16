@@ -707,6 +707,22 @@ export function CardTelemetry({ gpu }: { gpu: Gpu }) {
         ),
         '热降频是散热问题,需要处理;功耗墙是满载时的正常表现。',
       )}
+      {cell(
+        '近 1 小时热降频',
+        gpu.thermal_recent_pct === null ? (
+          '—'
+        ) : gpu.thermal_recent_pct === 0 ? (
+          '无'
+        ) : (
+          <span style={{ color: token.colorError }}>{gpu.thermal_recent_pct}% 的采样</span>
+        ),
+        // The reason above is the INSTANTANEOUS bit, and a card near its thermal
+        // target alternates between power cap and thermal slowdown from one
+        // sample to the next. Server19 sits at 87°C reporting "功耗墙" while
+        // roughly 1% of its samples were thermally throttled -- invisible
+        // without this figure.
+        '最近约 1 小时的采样里,有多少比例处于热降频。瞬时原因会掩盖它。',
+      )}
     </div>
   );
 }

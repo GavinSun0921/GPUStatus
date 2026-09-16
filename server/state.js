@@ -78,13 +78,25 @@ export function decodeThrottle(mask, { idle = false } = {}) {
 }
 
 /**
+ * Percentage of the recent window a card spent in thermal slowdown.
+ *
+ * Null (not 0) when there is no history yet: "no data" and "never throttled"
+ * are different answers, and 0 would claim the reassuring one.
+ */
+export function thermalShare(ring) {
+  if (!ring || ring.length < THERMAL_MIN_SAMPLES) return null;
+  const hot = ring.reduce((a, b) => a + b, 0);
+  return Number(((hot / ring.length) * 100).toFixed(1));
+}
+
+/**
  * One warning entry when any card on a host is throttled for a reason that
  * costs performance, e.g. "throttled:5/8_thermal".
  *
  * Reasons are reduced to a short set: an operator needs to know how many cards
  * and roughly why, then goes to look.
  */
-export function throttleWarnings(sample) {
+export function throttleWarnings(sample, thermal) {
   if (!sample || !Array.isArray(sample.gpus) || sample.gpus.length === 0) return [];
 
   const hot = [];
@@ -110,6 +122,16 @@ export function throttleWarnings(sample) {
   // card is idle, so gen < gen_max is routinely normal. Width does not do that,
   // and a card reporting fewer lanes is a real fault (riser, seating, slot).
   // Busy cards only, for the same reason the throttle check ignores idle ones.
+  // Cards that were thermally throttled at ANY point in the recent window, even
+  // if the newest sample happens to say "power cap". Without this the header
+  // reads "功耗墙" for a machine that is genuinely hitting its thermal target.
+  const recentThermal = sample.gpus.filter(
+    (g) => (thermalShare(thermal?.get(g.index)) ?? 0) > 0,
+  );
+  if (recentThermal.length > 0 && hot.length === 0) {
+    out.push(`throttled:${recentThermal.length}/${sample.gpus.length}_thermal_recent`);
+  }
+
   const narrow = sample.gpus.filter((g) => {
     const busy = (g.nProcs ?? 0) > 0 || (g.util ?? 0) >= 5;
     return (
@@ -124,6 +146,30 @@ export function throttleWarnings(sample) {
   }
   return out;
 }
+
+/**
+ * How many recent samples the thermal history remembers.
+ *
+ * The throttle bitmask is INSTANTANEOUS, and a card near its thermal target
+ * alternates: on Server19 the same card reports "power cap" in one sample and
+ * "thermal slowdown" in the next. Reading only the latest sample therefore says
+ * "功耗墙" almost always, and the ~1% of samples that were thermally throttled
+ * are never visible -- which is exactly the question an operator asks when a
+ * card sits at 87 degrees.
+ *
+ * 240 samples is about an hour at the default 15s interval.
+ */
+const THERMAL_WINDOW = 240;
+const THERMAL_BITS = 0x020 | 0x040;
+
+/**
+ * Samples needed before the share is reported.
+ *
+ * Just after a restart the window holds one or two samples, and a 0% share from
+ * two samples would read as "this card is fine" when it means "we have not
+ * looked long enough". Below this the share is null, which the UI shows as "—".
+ */
+const THERMAL_MIN_SAMPLES = 20;
 
 export const STATUS = {
   UNKNOWN: 'unknown',
@@ -241,6 +287,15 @@ export class State {
     entry.totalPolls += 1;
 
     if (result.ok && result.sample) {
+      entry.thermal = entry.thermal ?? new Map();
+      for (const gpu of result.sample.gpus ?? []) {
+        const mask = gpu.throttleMask;
+        if (typeof mask !== 'number') continue;
+        const ring = entry.thermal.get(gpu.index) ?? [];
+        ring.push((mask & THERMAL_BITS) !== 0 ? 1 : 0);
+        if (ring.length > THERMAL_WINDOW) ring.shift();
+        entry.thermal.set(gpu.index, ring);
+      }
       entry.latest = result.sample;
       entry.lastOk = result.sample.ts;
       entry.lastError = null;
@@ -434,7 +489,7 @@ export class State {
       // clock. Without this the machine looks "正常" while delivering a fraction
       // of its performance. (Found exactly that on Server19: 5 of 8 cards in
       // thermal slowdown at 930 MHz against a 3105 MHz maximum.)
-      warnings: [...entry.lastWarnings, ...throttleWarnings(latest)],
+      warnings: [...entry.lastWarnings, ...throttleWarnings(latest, entry.thermal)],
       stale: latest === null,
 
       hostname: latest?.hostname ?? null,
@@ -531,6 +586,10 @@ export class State {
         throttle_reasons: decodeThrottle(g.throttleMask, {
           idle: g.nProcs === 0 && (g.util === null || g.util < 5),
         }).reasons,
+        // Share of the recent window spent in thermal slowdown. The instant
+        // bitmask alone hides this: a card can be power-capped in 99 samples and
+        // thermally throttled in the next, and only the last one would show.
+        thermal_recent_pct: thermalShare(entry.thermal?.get(g.index)),
         throttled: decodeThrottle(g.throttleMask, {
           idle: g.nProcs === 0 && (g.util === null || g.util < 5),
         }).throttled,

@@ -13,7 +13,7 @@ import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeCon
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { aggregateUserUsage } from '../db.js';
 import { AdminConfigSchema } from '../../shared/schema.ts';
-import { State, decodeThrottle, displayGpuName, throttleWarnings } from '../state.js';
+import { State, decodeThrottle, displayGpuName, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
 import { createHash } from 'node:crypto';
@@ -1135,4 +1135,28 @@ test('a malformed session cookie is rejected, never thrown on', () => {
   assert.equal(auth.verifyToken(good, now), true);
   // sessionHours is 1, so two hours later it must be refused.
   assert.equal(auth.verifyToken(good, now + 2 * 3600_000), false, 'expired token accepted');
+});
+
+test('the thermal share refuses to reassure from too little history', () => {
+  // The throttle reason in the snapshot is INSTANTANEOUS, and a card near its
+  // thermal target alternates between "power cap" and "thermal slowdown" from
+  // one sample to the next. On Server19 that meant the dashboard said "功耗墙"
+  // for a card sitting at 87 degrees that was thermally throttling ~1% of the
+  // time. This share is what makes those events visible.
+
+  // Too little history must read as unknown, not as "never throttled" -- right
+  // after a restart every card would otherwise claim to be fine.
+  assert.equal(thermalShare(undefined), null);
+  assert.equal(thermalShare([]), null);
+  assert.equal(thermalShare([0, 0, 0]), null, 'three samples is not evidence of anything');
+
+  // With enough samples, a real share comes through.
+  const clean = Array(100).fill(0);
+  assert.equal(thermalShare(clean), 0);
+
+  const sometimes = [...Array(96).fill(0), ...Array(4).fill(1)];
+  assert.equal(thermalShare(sometimes), 4);
+
+  const always = Array(100).fill(1);
+  assert.equal(thermalShare(always), 100);
 });

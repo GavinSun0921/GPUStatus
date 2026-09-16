@@ -82,6 +82,15 @@ export const GpuSchema = z.object({
   throttle_reasons: z.array(z.string()),
   /** true only for a performance-costing reason on a card that is not idle */
   throttled: z.boolean(),
+  /**
+   * Share of the recent ~1h window this card spent in thermal slowdown.
+   *
+   * The bitmask above is instantaneous; a card near its thermal target
+   * alternates between "power cap" and "thermal slowdown" sample to sample, so
+   * the newest sample alone hides the thermal events. Null when there is no
+   * history yet -- "no data" is not "never throttled".
+   */
+  thermal_recent_pct: z.number().nullable(),
   sm_clock_mhz: num,
   sm_clock_max_mhz: num,
   power_limit_w: num,

@@ -68,15 +68,20 @@ export function warningLabel(code: string): string {
     return `${code.split(':')[1]} 个进程无法解析所属用户`;
   }
   if (code.startsWith('clock_skew:')) return `时钟偏差 ${code.slice(11)}`;
-  if (code.startsWith('pcie_degraded:')) {
-    const m = /pcie_degraded:(\d+)\/(\d+)/.exec(code);
-    return m ? `${m[1]}/${m[2]} 张卡 PCIe 链路降速` : 'PCIe 链路降速';
-  }
   if (code.startsWith('throttled:')) {
     const m = /throttled:(\d+)\/(\d+)_(\w+)/.exec(code);
     if (!m) return code;
-    const what = m[3] === 'thermal' ? '热降频' : '功耗墙限频';
+    const what =
+      m[3] === 'thermal'
+        ? '热降频'
+        : m[3] === 'thermal_recent'
+          ? '近期出现热降频'
+          : '功耗墙限频';
     return `${m[1]}/${m[2]} 张卡${what}`;
+  }
+  if (code.startsWith('pcie_degraded:')) {
+    const m = /pcie_degraded:(\d+)\/(\d+)/.exec(code);
+    return m ? `${m[1]}/${m[2]} 张卡 PCIe 链路降速` : 'PCIe 链路降速';
   }
   return code;
 }
