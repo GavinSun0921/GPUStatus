@@ -101,8 +101,14 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
   }
 
   const pidToUser = new Map();
+  // How long each process has been running, from `ps -o etime` (same call that
+  // resolves the owner, so this costs nothing extra on the target).
+  const pidToElapsed = new Map();
   for (const u of raw.pid_users ?? []) {
-    if (u && u.pid !== null && u.pid !== undefined && u.user) pidToUser.set(u.pid, u.user);
+    if (!u || u.pid === null || u.pid === undefined) continue;
+    if (u.user) pidToUser.set(u.pid, u.user);
+    const secs = num(u.elapsed_s);
+    if (secs !== null) pidToElapsed.set(u.pid, secs);
   }
 
   // pmon is keyed by (gpu index, pid): it is the only per-process utilisation
@@ -134,6 +140,7 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
       usedMemMib: num(p.used_mem_mib),
       smPct: pm ? num(pm.sm_pct) : null,
       kind: pm?.type ?? null,
+      elapsedS: pidToElapsed.get(p.pid) ?? null,
     });
   }
 
@@ -170,6 +177,13 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
       smClockMaxMhz: num(g.sm_clock_max_mhz),
       powerLimitW: num(g.power_limit_w),
       pstate: g.pstate && g.pstate !== 'null' ? String(g.pstate) : null,
+      // Static hardware configuration. A card that has trained down to a
+      // narrower or older PCIe link runs slower while every other metric looks
+      // normal, so this is the only place that shows it.
+      pcieGen: num(g.pcie_gen),
+      pcieWidth: num(g.pcie_width),
+      pcieGenMax: num(g.pcie_gen_max),
+      pcieWidthMax: num(g.pcie_width_max),
     }))
     .sort((a, b) => a.index - b.index);
 

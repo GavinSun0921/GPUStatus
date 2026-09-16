@@ -102,6 +102,26 @@ export function throttleWarnings(sample) {
   // cap at full utilisation is the card behaving as configured.
   if (hot.length > 0) out.push(`throttled:${hot.length}/${sample.gpus.length}_thermal`);
   if (power.length > 0) out.push(`throttled:${power.length}/${sample.gpus.length}_power_cap`);
+
+  // A PCIe link that has trained NARROWER than the card supports runs slower
+  // while every other metric looks normal.
+  //
+  // Width, not generation: a link renegotiates its generation down when the
+  // card is idle, so gen < gen_max is routinely normal. Width does not do that,
+  // and a card reporting fewer lanes is a real fault (riser, seating, slot).
+  // Busy cards only, for the same reason the throttle check ignores idle ones.
+  const narrow = sample.gpus.filter((g) => {
+    const busy = (g.nProcs ?? 0) > 0 || (g.util ?? 0) >= 5;
+    return (
+      busy &&
+      typeof g.pcieWidth === 'number' &&
+      typeof g.pcieWidthMax === 'number' &&
+      g.pcieWidth < g.pcieWidthMax
+    );
+  });
+  if (narrow.length > 0) {
+    out.push(`pcie_degraded:${narrow.length}/${sample.gpus.length}`);
+  }
   return out;
 }
 
@@ -375,6 +395,7 @@ export class State {
             pid: p.pid,
             name: p.name,
             gpu_index: p.gpuIndex,
+            elapsed_s: p.elapsedS ?? null,
             used_mem_mib: p.usedMemMib,
             sm_pct: p.smPct,
           })),
@@ -494,6 +515,15 @@ export class State {
         temp_c: g.tempC,
         power_w: g.powerW,
         fan_pct: g.fanPct,
+        // Memory-BANDWIDTH utilisation, distinct from mem_pct (which is how full
+        // the memory is). High compute + low bandwidth = compute-bound; the
+        // reverse means the job is waiting on data movement. Collected since the
+        // start but never surfaced until now.
+        mem_util_pct: g.memUtil ?? null,
+        pcie_gen: g.pcieGen ?? null,
+        pcie_width: g.pcieWidth ?? null,
+        pcie_gen_max: g.pcieGenMax ?? null,
+        pcie_width_max: g.pcieWidthMax ?? null,
         n_procs: g.nProcs,
         // Health telemetry. `throttled` is the bit a duty operator needs to
         // see; `throttle_reasons` explains it on hover.
@@ -514,6 +544,7 @@ export class State {
             pid: p.pid,
             username: p.username,
             name: p.name,
+            elapsed_s: p.elapsedS ?? null,
             used_mem_mib: p.usedMemMib,
             sm_pct: p.smPct,
           })),

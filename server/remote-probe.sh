@@ -83,7 +83,11 @@ else
   #
   # Cost of the five extra fields: measured 0.11s -> 0.12s per poll, no new
   # process and no extra NVML initialisation -- they ride along on this call.
-  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed,clocks_throttle_reasons.active,clocks.current.sm,clocks.max.sm,power.limit,pstate'
+  # pcie.link.* is appended at the END, so the trailing-index reads below shift
+  # by two. A card that has trained down to x4 or Gen1 runs slower while every
+  # other metric -- utilisation, temperature, power -- looks perfectly normal,
+  # which makes it invisible without this.
+  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed,clocks_throttle_reasons.active,clocks.current.sm,clocks.max.sm,power.limit,pstate,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max'
 
   # !! nvidia-smi prints NVML failures to STDOUT while exiting non-zero, so the
   # exit code must be honoured -- otherwise the error text would be parsed as a
@@ -122,7 +126,9 @@ else
       p = $2; gsub(/[ \t\r]/, "", p)
       if (p ~ /^[0-9]+$/) printf (c++ ? "," : "") "%s", p
     }')
-  [ -n "$PIDS" ] && PID_USERS=$(ps -o pid=,user= -p "$PIDS" 2>/dev/null)
+  # etime (elapsed time) rides along on the same ps call -- no extra process --
+  # so the UI can show how long a job has been holding a card.
+  [ -n "$PIDS" ] && PID_USERS=$(ps -o pid=,user=,etime= -p "$PIDS" 2>/dev/null)
 fi
 
 # Driver version, taken from /proc rather than from a fourth nvidia-smi call.
@@ -352,6 +358,23 @@ function num(v,   s) {
 }
 function trim(s) { gsub(/^[ \t\r]+/, "", s); gsub(/[ \t\r]+$/, "", s); return s }
 
+# `ps -o etime=` prints [[DD-]HH:]MM:SS. Converted to seconds so the UI does not
+# have to know the format.
+function etimeSeconds(v,   s, rest, parts, n, i, secs, days) {
+  s = trim(v)
+  if (s == "") return "null"
+  days = 0
+  if (index(s, "-") > 0) {
+    n = split(s, rest, "-")
+    days = rest[1] + 0
+    s = rest[2]
+  }
+  n = split(s, parts, ":")
+  secs = 0
+  for (i = 1; i <= n; i++) secs = secs * 60 + (parts[i] + 0)
+  return days * 86400 + secs
+}
+
 # Throttle reasons come as a hex bitmask ("0x0000000000000020").
 #
 # Parsed by hand rather than with strtonum(): that is a GNU awk extension, and
@@ -478,25 +501,31 @@ section == "GPU" {
   if ($0 == "") next
   n = split($0, f, ",")
   # 15 fields now; below this the trailing-index reads would silently misalign.
-  if (n < 15) next
+  if (n < 19) next
   k = ++ngpu
   gpu_index[k] = num(f[1])
   gpu_uuid[k]  = trim(f[2])
-  gpu_name[k]  = trim(join(f, 3, n - 12))
-  gpu_util[k]  = num(f[n - 11])
-  gpu_memused[k] = num(f[n - 10])
-  gpu_memtotal[k] = num(f[n - 9])
-  gpu_temp[k]  = num(f[n - 8])
-  gpu_power[k] = num(f[n - 7])
-  gpu_memutil[k] = num(f[n - 6])
-  gpu_fan[k]   = num(f[n - 5])
+  gpu_name[k]  = trim(join(f, 3, n - 16))
+  gpu_util[k]  = num(f[n - 15])
+  gpu_memused[k] = num(f[n - 14])
+  gpu_memtotal[k] = num(f[n - 13])
+  gpu_temp[k]  = num(f[n - 12])
+  gpu_power[k] = num(f[n - 11])
+  gpu_memutil[k] = num(f[n - 10])
+  gpu_fan[k]   = num(f[n - 9])
   # Throttle bitmask arrives as hex (0x0000000000000020); strtonum needs the
   # leading 0x, and a non-numeric value must not become 0 ("not throttled").
-  gpu_throttle[k] = hexnum(trim(f[n - 4]))
-  gpu_smclock[k]  = num(f[n - 3])
-  gpu_smclockmax[k] = num(f[n - 2])
-  gpu_powerlimit[k] = num(f[n - 1])
-  gpu_pstate[k] = trim(f[n])
+  gpu_throttle[k] = hexnum(trim(f[n - 8]))
+  gpu_smclock[k]  = num(f[n - 7])
+  gpu_smclockmax[k] = num(f[n - 6])
+  gpu_powerlimit[k] = num(f[n - 5])
+  gpu_pstate[k] = trim(f[n - 4])
+  # Width is the degradation signal that can be trusted: a PCIe link
+  # renegotiates its GENERATION down when the card is idle, but not its width.
+  gpu_pciegen[k]      = num(f[n - 3])
+  gpu_pciewidth[k]    = num(f[n - 2])
+  gpu_pciegenmax[k]   = num(f[n - 1])
+  gpu_pciewidthmax[k] = num(f[n])
   next
 }
 
@@ -522,6 +551,7 @@ section == "PIDUSER" {
   if (n < 2) next
   piduser_pid[++npu] = num(f[1])
   piduser_name[npu]  = trim(f[2])
+  piduser_secs[npu]  = (n >= 3) ? etimeSeconds(f[3]) : "null"
   next
 }
 
@@ -572,10 +602,11 @@ END {
 
   printf "  \"gpus\": ["
   for (i = 1; i <= ngpu; i++) {
-    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s, \"throttle\": %s, \"sm_clock_mhz\": %s, \"sm_clock_max_mhz\": %s, \"power_limit_w\": %s, \"pstate\": %s}",
+    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s, \"throttle\": %s, \"sm_clock_mhz\": %s, \"sm_clock_max_mhz\": %s, \"power_limit_w\": %s, \"pstate\": %s, \"pcie_gen\": %s, \"pcie_width\": %s, \"pcie_gen_max\": %s, \"pcie_width_max\": %s}",
       (i > 1 ? "," : ""), gpu_index[i], str(gpu_uuid[i]), str(gpu_name[i]), gpu_util[i],
       gpu_memused[i], gpu_memtotal[i], gpu_memutil[i], gpu_temp[i], gpu_power[i], gpu_fan[i],
-      gpu_throttle[i], gpu_smclock[i], gpu_smclockmax[i], gpu_powerlimit[i], str(gpu_pstate[i])
+      gpu_throttle[i], gpu_smclock[i], gpu_smclockmax[i], gpu_powerlimit[i], str(gpu_pstate[i]),
+      gpu_pciegen[i], gpu_pciewidth[i], gpu_pciegenmax[i], gpu_pciewidthmax[i]
   }
   printf "%s  ],\n", (ngpu > 0 ? "\n" : "")
 
@@ -588,7 +619,8 @@ END {
 
   printf "  \"pid_users\": ["
   for (i = 1; i <= npu; i++) {
-    printf "%s\n    {\"pid\": %s, \"user\": %s}", (i > 1 ? "," : ""), piduser_pid[i], str(piduser_name[i])
+    printf "%s\n    {\"pid\": %s, \"user\": %s, \"elapsed_s\": %s}", (i > 1 ? "," : ""),
+      piduser_pid[i], str(piduser_name[i]), piduser_secs[i]
   }
   printf "%s  ],\n", (npu > 0 ? "\n" : "")
 

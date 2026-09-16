@@ -39,6 +39,8 @@ export const GpuProcSchema = z.object({
   pid: z.number(),
   username: str,
   name: str,
+  /** seconds this process has been running, from `ps -o etime` */
+  elapsed_s: num,
   used_mem_mib: num,
   sm_pct: num,
 });
@@ -57,6 +59,23 @@ export const GpuSchema = z.object({
   temp_c: num,
   power_w: num,
   fan_pct: num,
+  /**
+   * Memory-BANDWIDTH utilisation, which is not the same as `mem_pct` (how full
+   * the memory is). High compute with low bandwidth means the job is
+   * compute-bound; the reverse means it is waiting on data movement.
+   */
+  mem_util_pct: num,
+  /**
+   * PCIe link the card has currently trained to, and what it supports.
+   *
+   * `width < width_max` on a BUSY card is a real fault (riser, seating, slot).
+   * `gen < gen_max` is not a reliable signal on its own: a link renegotiates its
+   * generation down when the card is idle.
+   */
+  pcie_gen: num,
+  pcie_width: num,
+  pcie_gen_max: num,
+  pcie_width_max: num,
   /** nvidia-smi clocks_throttle_reasons bitmask; null when not reported */
   throttle_mask: num,
   /** decoded reason names, e.g. ['热降频'] */
@@ -77,6 +96,7 @@ export const HostUserProcSchema = z.object({
   pid: z.number(),
   name: str,
   gpu_index: z.number().nullable(),
+  elapsed_s: num,
   used_mem_mib: num,
   sm_pct: num,
 });

@@ -8,6 +8,7 @@ import { activityColor, severity, useSeverityColors } from '../severity';
 import { StatusLight } from './StatusLight';
 import { HostNote } from './Announcement';
 import { MachineHistory } from './MachineHistory';
+import { MachineInfo } from './MachineInfo';
 
 /**
  * One machine: a header of labelled meters, then a table with ONE ROW PER CARD.
@@ -270,7 +271,12 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
           point of the toggle is to SEE the trend, and at the bottom of the card
           clicking 详情 looked like it had done nothing until you scrolled past
           eight GPU rows and the disk panel. */}
-      {showDetail && <MachineHistory hostId={host.id} />}
+      {showDetail && (
+        <>
+          <MachineHistory hostId={host.id} />
+          <MachineInfo host={host} />
+        </>
+      )}
 
       <div style={{ padding: '12px 16px 4px' }}>
         <Row gutter={[28, 12]}>
@@ -352,7 +358,12 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
         expandable={{
           // Only cards with processes have anything to expand.
           rowExpandable: (gpu) => gpu.procs.length > 0,
-          expandedRowRender: (gpu) => <ProcTable gpu={gpu} />,
+          expandedRowRender: (gpu) => (
+            <>
+              <CardTelemetry gpu={gpu} />
+              <ProcTable gpu={gpu} />
+            </>
+          ),
           // Clicking anywhere on the row toggles it, not just the icon. The
           // icon stays: it is what tells you the row CAN be expanded, and it
           // has to remain clickable for that to be discoverable.
@@ -598,6 +609,108 @@ function NetMountPanel({ host }: { host: Host }) {
   );
 }
 
+/**
+ * Colour a throttle reason by whether anyone can act on it.
+ *
+ * A power cap at full utilisation is the card doing exactly what it is
+ * configured to do -- every one of Server14's eight cards sits there whenever it
+ * is busy. Painting that red trains people to ignore the colour. Thermal and
+ * hardware reasons are the ones worth a red mark.
+ */
+function throttleTone(gpu: Gpu, token: ReturnType<typeof theme.useToken>['token']) {
+  if (gpu.throttle_reasons.length === 0) return undefined;
+  const serious = gpu.throttle_reasons.some((r) => r !== '功耗墙' && r !== '空闲');
+  if (serious) return token.colorError;
+  return gpu.throttle_reasons.includes('功耗墙') ? token.colorWarning : token.colorTextTertiary;
+}
+
+/**
+ * The full telemetry for one card, shown when its row is expanded.
+ *
+ * These are per-card values that do not fit as table columns without squeezing
+ * the process list, and they are only interesting once you have already decided
+ * to look at this card.
+ */
+export function CardTelemetry({ gpu }: { gpu: Gpu }) {
+  const { token } = theme.useToken();
+
+  const cell = (label: string, value: React.ReactNode, hint?: string) => (
+    <div key={label} title={hint} style={{ minWidth: 96 }}>
+      <div style={{ fontSize: 10.5, color: token.colorTextTertiary }}>{label}</div>
+      <div style={{ fontSize: 12 }}>{value}</div>
+    </div>
+  );
+
+  const pcieDegraded =
+    gpu.pcie_width !== null &&
+    gpu.pcie_width_max !== null &&
+    gpu.pcie_width < gpu.pcie_width_max &&
+    (gpu.n_procs > 0 || (gpu.util ?? 0) >= 5);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '10px 26px',
+        padding: '10px 12px',
+        marginBottom: 8,
+        borderRadius: token.borderRadius,
+        background: token.colorFillQuaternary,
+      }}
+    >
+      {cell(
+        'SM 时钟',
+        gpu.sm_clock_mhz === null
+          ? '—'
+          : `${Math.round(gpu.sm_clock_mhz)} / ${Math.round(gpu.sm_clock_max_mhz ?? 0)} MHz`,
+        '当前 SM 时钟 / 该卡最高 SM 时钟。远低于最高值说明在降频。',
+      )}
+      {cell(
+        '显存带宽',
+        gpu.mem_util_pct === null ? '—' : `${Math.round(gpu.mem_util_pct)}%`,
+        '显存带宽利用率,与"显存占用"不是一回事。算力高而带宽低=算力受限;反过来=卡在数据搬运上。',
+      )}
+      {cell(
+        '风扇',
+        gpu.fan_pct === null ? '—' : `${Math.round(gpu.fan_pct)}%`,
+        '风扇转速。温度高而转速不满,可能是散热或风扇故障。',
+      )}
+      {cell('P-State', gpu.pstate ?? '—', 'P0=满性能,P2/P8=节能状态')}
+      {cell(
+        '功耗上限',
+        gpu.power_limit_w === null ? '—' : `${Math.round(gpu.power_limit_w)} W`,
+      )}
+      {cell(
+        'PCIe',
+        gpu.pcie_gen === null || gpu.pcie_width === null ? (
+          '—'
+        ) : (
+          <span style={{ color: pcieDegraded ? token.colorError : undefined }}>
+            Gen{gpu.pcie_gen} ×{gpu.pcie_width}
+            {gpu.pcie_width_max !== null && gpu.pcie_width < gpu.pcie_width_max && (
+              <span style={{ color: token.colorTextTertiary }}>
+                {' '}
+                (最高 ×{gpu.pcie_width_max})
+              </span>
+            )}
+          </span>
+        ),
+        'PCIe 链路。繁忙时宽度低于该卡上限,说明链路降速 —— 其它指标都正常,但卡会变慢。',
+      )}
+      {cell(
+        '降频原因',
+        gpu.throttle_reasons.length === 0 ? (
+          '无'
+        ) : (
+          <span style={{ color: throttleTone(gpu, token) }}>{gpu.throttle_reasons.join(' · ')}</span>
+        ),
+        '热降频是散热问题,需要处理;功耗墙是满载时的正常表现。',
+      )}
+    </div>
+  );
+}
+
 /** Compact "who is on this card" summary: user next to PID, as requested. */
 function ProcSummary({ gpu }: { gpu: Gpu }) {
   if (gpu.procs.length === 0) {
@@ -662,6 +775,21 @@ export function ProcTable({ gpu }: { gpu: Gpu }) {
           {pid}
         </Typography.Text>
       ),
+    },
+    {
+      // How long this process has been holding the card. A job left running for
+      // days is the usual reason a GPU looks busy but nobody is getting anything
+      // out of it, and nothing else on the page showed it.
+      title: '已运行',
+      dataIndex: 'elapsed_s',
+      width: 100,
+      align: 'right',
+      render: (secs: number | null) =>
+        secs === null ? (
+          <Typography.Text type="secondary">—</Typography.Text>
+        ) : (
+          <Typography.Text style={{ fontSize: 11.5 }}>{duration(secs)}</Typography.Text>
+        ),
     },
     {
       title: 'SM 利用率',

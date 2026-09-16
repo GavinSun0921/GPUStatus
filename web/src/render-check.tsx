@@ -83,7 +83,8 @@ const { render } = await import('@testing-library/react');
 const { ConfigProvider, theme } = await import('antd');
 const zhCN = (await import('antd/locale/zh_CN')).default;
 const { Overview } = await import('./components/Overview');
-const { ProcTable } = await import('./components/Machine');
+const { ProcTable, CardTelemetry } = await import('./components/Machine');
+const { MachineInfo } = await import('./components/MachineInfo');
 const { UsersView } = await import('./components/Reports');
 
 const API =
@@ -207,6 +208,36 @@ check(
   countOf('cell-model') === expectedGpus,
   `rendered ${countOf('cell-model')} GPU model cells, expected ${expectedGpus}`,
 );
+
+// The machine detail panel is collapsed by default, so it is absent from the
+// markup above by design -- render it explicitly here.
+//
+// Asserted by label because the failure mode is a field quietly dropping out of
+// the panel, which the type system cannot see (an optional field that stops
+// being rendered still compiles).
+const detailView = renderView(<MachineInfo host={snapshot.hosts[0]} />);
+const detailText = detailView.textContent ?? '';
+for (const label of [
+  '主机名',
+  'SSH 目标',
+  '内核',
+  '显卡驱动',
+  'PCIe 链路',
+  '采集成功',
+  '上次采集耗时',
+  '时钟偏差',
+  '负载 1/5/15',
+  'IO 等待',
+]) {
+  check(detailText.includes(label), `machine detail is missing "${label}"`);
+}
+
+// And the per-card telemetry, shown when a card row is expanded.
+const telemetryView = renderView(<CardTelemetry gpu={snapshot.hosts[0].gpus[0]} />);
+const telemetryText = telemetryView.textContent ?? '';
+for (const label of ['SM 时钟', '显存带宽', '风扇', 'P-State', 'PCIe', '降频原因']) {
+  check(telemetryText.includes(label), `card telemetry is missing "${label}"`);
+}
 
 // Every machine must offer its detail toggle, and the chart must NOT be in the
 // initial markup -- it is collapsed by default and fetched on demand, so a
@@ -365,6 +396,11 @@ const card = (
   temp_c: 30,
   power_w: 20,
   fan_pct: 30,
+  mem_util_pct: 20,
+  pcie_gen: 4,
+  pcie_width: 16,
+  pcie_gen_max: 4,
+  pcie_width_max: 16,
   n_procs: 0,
   procs: [],
   throttle_mask: 0,
@@ -385,9 +421,9 @@ const sharedCard = card(1, {
   power_w: 300,
   n_procs: 3,
   procs: [
-    { pid: 111111, username: 'alice', name: 'python train.py', used_mem_mib: 8000, sm_pct: 45 },
-    { pid: 222222, username: 'bob', name: 'python eval.py', used_mem_mib: 7000, sm_pct: 35 },
-    { pid: 333333, username: 'carol', name: 'python infer.py', used_mem_mib: 5000, sm_pct: 20 },
+    { pid: 111111, username: 'alice', name: 'python train.py', elapsed_s: 3600, used_mem_mib: 8000, sm_pct: 45 },
+    { pid: 222222, username: 'bob', name: 'python eval.py', elapsed_s: 7200, used_mem_mib: 7000, sm_pct: 35 },
+    { pid: 333333, username: 'carol', name: 'python infer.py', elapsed_s: 10800, used_mem_mib: 5000, sm_pct: 20 },
   ],
 });
 
@@ -416,7 +452,7 @@ const synthetic: Snapshot = {
           mem_used_mib: 100,
           mem_pct: 0.4,
           n_procs: 1,
-          procs: [{ pid: 444444, username: null, name: 'unknown', used_mem_mib: 100, sm_pct: null }],
+          procs: [{ pid: 444444, username: null, name: 'unknown', elapsed_s: null, used_mem_mib: 100, sm_pct: null }],
         }),
         card(3, {
           // thermally throttled at 100% utilisation -- the case the whole
@@ -429,7 +465,7 @@ const synthetic: Snapshot = {
           power_w: 260,
           n_procs: 1,
           procs: [
-            { pid: 555555, username: 'dave', name: 'python train.py', used_mem_mib: 40000, sm_pct: 98 },
+            { pid: 555555, username: 'dave', name: 'python train.py', elapsed_s: 86400, used_mem_mib: 40000, sm_pct: 98 },
           ],
           throttle_mask: 0x20,
           throttle_reasons: ['热降频'],
