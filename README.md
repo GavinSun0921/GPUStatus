@@ -3,7 +3,8 @@
 多机 GPU / CPU / 内存监控看板。**中心主动采集**、**目标机器零安装**、**轻量 SQLite 留存用量记录**。
 
 - 纯 SSH 轮询采集,客户 GPU 机器上**不需要装任何东西**(不装 agent、不装 Python、不开端口)
-- 后端**零 npm 依赖**(仅用 Node 内置的 `node:http` / `node:sqlite` / `node:child_process`)
+- 后端依赖极少(`better-sqlite3` + `jsonc-parser`),HTTP 服务用 Node 内置 `node:http`
+- **目标机器零依赖**才是硬约束:只经 SSH 调用目标机上的 `sh` / `awk` / `nvidia-smi`,不装任何东西
 - 按用户名展示:哪台机器、哪张卡、占多少显存、GPU 利用率多少
 - 机器采集失败时状态灯 **绿 → 黄 → 红**,并在事件表留下记录
 - 每小时的用户用量汇总**永久保留**,原始采样可定期清理,便于年终统计
@@ -24,7 +25,7 @@
                    │      │  ├── 状态灯状态机 绿/黄/红 │                                │
                    │      │  └── 变更 → events 表    │                                │
                    │      ▼                       │                                  │
-                   │   SQLite (node:sqlite)       │                                  │
+                   │   SQLite (better-sqlite3)    │                                  │
                    │    ├── 原始采样(默认留 7 天)     │                                │
                    │    └── usage_rollup(永久)      │                                │
                    │      │                       │                                  │
@@ -73,7 +74,7 @@ fork 数降到 ~12 次,采集耗时降到 **0.7~1.0s**,且几乎全部是 `nvidi
 
 ### 部署机(跑本服务的机器)
 
-- **Node.js ≥ 22.5**(推荐 24.x;需要内置 `node:sqlite`;Node 22 需加 `--experimental-sqlite`)
+- **Node.js ≥ 20**(推荐 22/24 LTS;数据库用 `better-sqlite3`,从预编译包安装,不需要编译器)
 - 能免密 SSH 登录所有被监控机器(密钥认证)
 - 前端构建需要 npm(仅首次构建)
 

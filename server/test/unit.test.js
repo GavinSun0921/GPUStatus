@@ -22,27 +22,42 @@ import { join } from 'node:path';
 
 // --------------------------------------------------------------- config -----
 
-test('parseJsonc strips comments but not comment-like text inside strings', () => {
-  const input = `{
-    // a line comment
-    "url": "http://example.com//path", // trailing comment
-    /* block
-       comment */
-    "glob": "a/*b*/c",
+test('parseJsonc accepts the JSONC features our config files use', () => {
+  // Comment stripping and trailing commas are now jsonc-parser's job. What is
+  // still worth asserting is that we CONFIGURE it that way -- dropping the
+  // allowTrailingComma option would silently make every existing config file
+  // with a trailing comma unreadable.
+  const parsed = parseJsonc(`{
+    // line comment
+    "site": "lab",          /* block comment */
+    "url": "http://example.com//x",   // a URL is not a comment
     "list": [1, 2, 3,],
-  }`;
-  const parsed = parseJsonc(input);
-  const value = JSON.parse(parsed);
+    "nested": { "a": true, },
+  }`);
 
-  // A naive regex stripper would have mangled both of these.
-  assert.equal(value.url, 'http://example.com//path');
-  assert.equal(value.glob, 'a/*b*/c');
-  assert.deepEqual(value.list, [1, 2, 3]);
+  assert.equal(parsed.site, 'lab');
+  assert.equal(parsed.url, 'http://example.com//x', 'comment-like text inside a string was altered');
+  assert.deepEqual(parsed.list, [1, 2, 3]);
+  assert.deepEqual(parsed.nested, { a: true });
 });
 
-test('parseJsonc preserves escaped quotes', () => {
-  const value = JSON.parse(parseJsonc('{"s": "a\\"b // not a comment"}'));
-  assert.equal(value.s, 'a"b // not a comment');
+test('parseJsonc reports WHERE a config file is broken', () => {
+  // The reason we do not just call JSON.parse: a bare "Unexpected token" for a
+  // 300-line config file is not actionable. jsonc-parser gives an offset, and we
+  // turn it into a line and column an editor can jump to.
+  const broken = ['{', '  "site": "lab",', '  "hosts": @', '}'].join('\n');
+  assert.throws(
+    () => parseJsonc(broken),
+    (err) => {
+      assert.match(err.message, /line 3/, `expected a line number, got: ${err.message}`);
+      assert.match(err.message, /column 12/, `expected a column, got: ${err.message}`);
+      return true;
+    },
+  );
+
+  // An empty or comment-only file is a mistake, not an empty config.
+  assert.throws(() => parseJsonc(''), /line 1/);
+  assert.throws(() => parseJsonc('// nothing here\n'), /ValueExpected|line/);
 });
 
 test('loadConfig rejects duplicate host ids and missing ssh targets', () => {

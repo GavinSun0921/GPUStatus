@@ -5,7 +5,7 @@
   "description": "Lightweight multi-host GPU/CPU/memory monitoring dashboard. Zero backend dependencies.",
   "type": "module",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node server/index.js",
@@ -19,5 +19,9 @@
   },
   "devDependencies": {
     "playwright-core": "^1.63.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "jsonc-parser": "^3.3.1"
   }
 }

@@ -7,6 +7,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { parse, printParseErrorCode } from 'jsonc-parser';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
@@ -20,64 +21,43 @@ export const PROJECT_ROOT = resolve(HERE, '..');
  * would corrupt any string containing `//` (e.g. a URL or a path), so string
  * and escape state is tracked explicitly.
  */
+/**
+ * Parse JSON-with-comments into a value.
+ *
+ * Delegates to `jsonc-parser`, the implementation VS Code uses for the same job.
+ * This was hand-written (a ~60-line character state machine). It passed every
+ * adversarial case thrown at it, but "my parser is correct" is not a claim worth
+ * maintaining when a battle-tested one is one import away.
+ *
+ * The library also reports WHERE a problem is, which is what makes a broken
+ * config file diagnosable instead of just "unexpected token".
+ */
+/** 1-based line/column for a character offset, for a human-readable error. */
+function offsetToLineColumn(text, offset) {
+  const upto = text.slice(0, offset);
+  // 0-based, like most editors' internals; the caller adds 1 for display.
+  return {
+    line: upto.split('\n').length - 1,
+    column: offset - (upto.lastIndexOf('\n') + 1),
+  };
+}
+
 export function parseJsonc(text) {
-  let out = '';
-  let inString = false;
-  let inLine = false;
-  let inBlock = false;
+  const errors = [];
+  const value = parse(text, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+    allowEmptyContent: false,
+  });
 
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const next = text[i + 1];
-
-    if (inLine) {
-      if (ch === '\n') {
-        inLine = false;
-        out += ch;
-      }
-      continue;
-    }
-    if (inBlock) {
-      if (ch === '*' && next === '/') {
-        inBlock = false;
-        i++;
-      }
-      continue;
-    }
-    if (inString) {
-      out += ch;
-      if (ch === '\\') {
-        // Copy the escaped character verbatim so `\"` does not end the string.
-        if (next !== undefined) {
-          out += next;
-          i++;
-        }
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = true;
-      out += ch;
-      continue;
-    }
-    if (ch === '/' && next === '/') {
-      inLine = true;
-      i++;
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      inBlock = true;
-      i++;
-      continue;
-    }
-    out += ch;
+  if (errors.length > 0) {
+    const { error, offset } = errors[0];
+    const { line, column } = offsetToLineColumn(text, offset);
+    throw new Error(
+      `${printParseErrorCode(error)} at offset ${offset} (line ${line + 1}, column ${column + 1})`,
+    );
   }
-
-  // Drop trailing commas: a comma followed only by whitespace and a closer.
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  return value;
 }
 
 function fail(msg) {
@@ -325,7 +305,7 @@ export function loadConfig(configPath) {
 
   let parsed;
   try {
-    parsed = JSON.parse(parseJsonc(raw));
+    parsed = parseJsonc(raw);
   } catch (err) {
     throw new Error(`Cannot parse ${path} as JSONC: ${err.message}`);
   }
