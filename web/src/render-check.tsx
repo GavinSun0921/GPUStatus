@@ -1,23 +1,89 @@
 /**
  * Render smoke test.
  *
- * Fetches a REAL snapshot from the running backend and renders the data-bearing
- * components to static HTML, then asserts the values actually appear in the
- * output. Type-checking and contract checks prove the shapes line up; only
- * rendering proves the components do not throw on real data.
+ * Fetches a REAL snapshot from the running backend, renders the data-bearing
+ * components into a jsdom document, and asserts against the resulting DOM.
+ * Type-checking and contract checks prove the shapes line up; only rendering
+ * proves the components do not throw on real data.
+ *
+ * Was named ssr-check when it rendered to a static HTML string and asserted on
+ * that string with substring counts; see the note by the jsdom setup for why
+ * that was replaced.
  *
  * Run against a live backend:
  *   npm run check:render
  */
 
-import { renderToStaticMarkup } from 'react-dom/server';
-import { ConfigProvider, theme } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
-
-import { Overview } from './components/Overview';
-import { ProcTable } from './components/Machine';
-import { UsersView } from './components/Reports';
+import { JSDOM } from 'jsdom';
 import type { Gpu, Snapshot } from './types';
+
+// A real DOM, installed BEFORE React and antd are imported (hence the dynamic
+// imports below: ESM hoists static ones, which would run antd before `document`
+// exists).
+//
+// This replaced rendering to a static HTML string and asserting on it with
+// substring counts. Counting occurrences of "gpu-row" in markup is not the same
+// as counting rows: adding a second class `gpu-row-expandable` made every row
+// count twice (48 rows reported as 95), and a class named `cell-model-REMOVED`
+// still matched "cell-model". Both happened. Element queries do not have that
+// failure mode, and they are what @testing-library exists to provide.
+const dom = new JSDOM('<!doctype html><html><body></body></html>', { pretendToBeVisual: true });
+// defineProperty, not assignment: Node 24 defines `navigator` as a getter-only
+// global, so a plain `globalThis.navigator = ...` throws.
+const install = (name: string, value: unknown) =>
+  Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
+
+// antd's responsive observer and rc-* reach for these on `window`, and jsdom
+// does not implement matchMedia at all.
+const matchMediaStub = (query: string) => ({
+  matches: false,
+  media: query,
+  onchange: null,
+  addListener: () => {},
+  removeListener: () => {},
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  dispatchEvent: () => false,
+});
+Object.defineProperty(dom.window, 'matchMedia', { value: matchMediaStub, writable: true });
+
+// Everything antd and recharts touch, taken straight off the jsdom window.
+for (const name of [
+  'window', 'document', 'navigator', 'location', 'history',
+  'HTMLElement', 'HTMLDivElement', 'HTMLInputElement', 'SVGElement', 'Element', 'Node',
+  'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent', 'DOMRect', 'DOMParser',
+  'getComputedStyle', 'ResizeObserver', 'MutationObserver', 'IntersectionObserver',
+  'matchMedia',
+] as const) {
+  const value = (dom.window as unknown as Record<string, unknown>)[name];
+  if (value === undefined) continue;
+  install(name, typeof value === 'function' && name === 'getComputedStyle'
+    ? value.bind(dom.window)
+    : value);
+}
+install('requestAnimationFrame', (cb: FrameRequestCallback) => setTimeout(() => cb(Date.now()), 0));
+install('cancelAnimationFrame', (id: number) => clearTimeout(id));
+
+// jsdom implements neither observer. antd's table and the chart container
+// construct them on mount; a no-op that simply never fires is enough, since
+// this check asserts what is rendered, not how it is measured.
+class NoopObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return [];
+  }
+}
+install('ResizeObserver', NoopObserver);
+install('IntersectionObserver', NoopObserver);
+
+const { render } = await import('@testing-library/react');
+const { ConfigProvider, theme } = await import('antd');
+const zhCN = (await import('antd/locale/zh_CN')).default;
+const { Overview } = await import('./components/Overview');
+const { ProcTable } = await import('./components/Machine');
+const { UsersView } = await import('./components/Reports');
 
 const API =
   // Minimal typed view of the Node global, declared locally so that this script
@@ -32,15 +98,11 @@ if (!snapshot.hosts?.length) throw new Error('snapshot contains no hosts');
 
 const now = snapshot.server_now;
 
-/** antd needs its ConfigProvider for tokens/locale; the algorithm is irrelevant to markup. */
-const render = (node: React.ReactNode) =>
-  renderToStaticMarkup(
-    <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
-      {node}
-    </ConfigProvider>,
-  );
+/** antd needs its ConfigProvider for tokens/locale. */
+const renderView = (node: React.ReactNode, algorithm = theme.defaultAlgorithm) =>
+  render(<ConfigProvider locale={zhCN} theme={{ algorithm }}>{node}</ConfigProvider>).container;
 
-const html = render(
+const view = renderView(
   <>
     <Overview snapshot={snapshot} now={now} />
     <UsersView snapshot={snapshot} />
@@ -52,7 +114,22 @@ const failures: string[] = [];
 const check = (condition: boolean, label: string) => {
   if (!condition) failures.push(label);
 };
-const countOf = (needle: string, haystack: string = html) => haystack.split(needle).length - 1;
+
+/** Visible text only: an attribute value is not something the operator can read. */
+const text = view.textContent ?? '';
+/** Raw markup, for the checks that must catch a leaked value in ANY position. */
+const html = view.innerHTML;
+/**
+ * Count ELEMENTS carrying a class -- not occurrences of a substring.
+ *
+ * `countOf('gpu-row')` returns one per row even when the element also carries
+ * `row-clickable`, which is the bug substring counting produced.
+ */
+const countOf = (className: string, root: Element | Document = view) =>
+  root.querySelectorAll(`.${className}`).length;
+/** Occurrences in visible text, for "this string must appear exactly once". */
+const countText = (needle: string, haystack: string = text) =>
+  haystack.split(needle).length - 1;
 
 for (const host of snapshot.hosts) {
   check(html.includes(host.label), `host label missing: ${host.label}`);
@@ -91,7 +168,7 @@ check(
 
 // One machine card per host and one row per physical card -- this is what
 // catches a host or a card being silently dropped by the table.
-const machines = countOf('id="host-');
+const machines = view.querySelectorAll('[id^="host-"]').length;
 const expectedMachines = snapshot.hosts.length;
 check(machines === expectedMachines, `rendered ${machines} machine cards, expected ${expectedMachines}`);
 
@@ -149,6 +226,53 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// Theme behaviour.
+//
+// This replaces two tests that grepped App.tsx for the strings `darkAlgorithm`
+// and `colorSuccess`: that only proved the text existed, and broke on any
+// refactor that moved the code without changing behaviour. Rendering the same
+// tree under both algorithms and comparing the output proves the thing that
+// actually matters -- that theme tokens reach the components.
+{
+  // antd v6 publishes its tokens as CSS custom properties in an injected
+  // <style> tag -- NOT as inline styles, which is why computing a colour from
+  // an element returns `var(--ant-color-text)` and tells you nothing. Reading
+  // the variable itself is the observable signal.
+  //
+  // Styles accumulate in document.head across renders, so the LAST occurrence
+  // of a variable belongs to the most recent render.
+  const lastVar = (name: string) => {
+    const css = [...dom.window.document.querySelectorAll('style')]
+      .map((el) => el.textContent ?? '')
+      .join('');
+    const all = [...css.matchAll(new RegExp(`--${name}:\\s*([^;]+)`, 'g'))];
+    return all.length ? all[all.length - 1][1].trim() : null;
+  };
+  /** Perceived brightness, 0 (black) to 1 (white). */
+  const brightness = (colour: string | null) => {
+    const hex = colour && /^#([0-9a-f]{6})$/i.exec(colour.trim());
+    if (!hex) return null;
+    const n = parseInt(hex[1], 16);
+    return (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
+  };
+
+  renderView(<Overview snapshot={snapshot} now={now} />, theme.defaultAlgorithm);
+  const lightBg = lastVar('ant-color-bg-container');
+  renderView(<Overview snapshot={snapshot} now={now} />, theme.darkAlgorithm);
+  const darkBg = lastVar('ant-color-bg-container');
+
+  check(lightBg !== null && darkBg !== null, 'antd published no background token to inspect');
+  check(lightBg !== darkBg, `both themes publish the same background (${lightBg})`);
+
+  const lightLum = brightness(lightBg);
+  const darkLum = brightness(darkBg);
+  check(
+    lightLum !== null && darkLum !== null && darkLum < lightLum,
+    `the "dark" theme is not darker than the light one (${darkBg} vs ${lightBg})`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // API contract check.
 //
 // The UI does `JSON.parse(...) as Snapshot`, so nothing validates the response
@@ -199,7 +323,7 @@ check(
 // header once -- not repeated as a tag on every machine card. This render covers
 // only the machine list, so the name must not appear here at all.
 if (snapshot.site) {
-  const repeats = countOf(snapshot.site);
+  const repeats = countText(snapshot.site);
   check(
     repeats === 0,
     `site name "${snapshot.site}" appears ${repeats}x inside the machine list; ` +
@@ -358,50 +482,53 @@ const synthetic: Snapshot = {
   ],
 };
 
-const edgeHtml = render(<Overview snapshot={synthetic} now={now} />);
+const edgeView = renderView(<Overview snapshot={synthetic} now={now} />);
+const edgeText = edgeView.textContent ?? '';
+const edgeHtml = edgeView.innerHTML;
 // The full per-process breakdown lives in the expanded row, which a collapsed
 // SSR render never produces, so the shared card's detail table is rendered
 // directly. This is the case the user asked about: several users, one card.
-const expandedHtml = render(<ProcTable gpu={sharedCard} />);
+const expandedView = renderView(<ProcTable gpu={sharedCard} />);
+const expandedText = expandedView.textContent ?? '';
 
 const edgeChecks: [boolean, string][] = [
-  [edgeHtml.includes('空闲'), 'idle card does not render as 空闲'],
+  [edgeText.includes('空闲'), 'idle card does not render as 空闲'],
   // The real requirement: NO process may be elided. The UI used to render only
   // the first process and summarise the rest as a count, so on a card shared by
   // two people the second person's name appeared nowhere in the table.
   [
-    ['alice', 'bob', 'carol'].every((u) => edgeHtml.includes(u)),
+    ['alice', 'bob', 'carol'].every((u) => edgeText.includes(u)),
     'a card shared by three users does not show all three',
   ],
   [
-    ['111111', '222222', '333333'].every((p) => edgeHtml.includes(p)),
+    ['111111', '222222', '333333'].every((p) => edgeText.includes(p)),
     'a card shared by three processes does not show all three PIDs',
   ],
-  [edgeHtml.includes('alice@111111'), 'process chip is not in user@pid form'],
+  [edgeText.includes('alice@111111'), 'process chip is not in user@pid form'],
   // The throttled card must be marked. Without this the card reads as a healthy
   // 100%-utilisation GPU, which is exactly the failure mode that hid Server19's
   // thermal throttling.
-  [countOf('throttle-tag', edgeHtml) === 1, 'throttled card is not marked'],
+  [countOf('throttle-tag', edgeView) === 1, 'throttled card is not marked'],
   // warningLabel() must translate the code; a raw "throttled:5/8_thermal" on
   // screen would be unreadable to the person on duty.
-  [edgeHtml.includes('5/8 张卡热降频'), 'throttle warning is not rendered in Chinese'],
-  [!edgeHtml.includes('throttled:5/8_thermal'), 'raw throttle code leaked into the UI'],
-  [edgeHtml.includes('降频'), 'throttle tag has no text'],
-  [edgeHtml.includes('未知用户'), 'unresolved process owner is not labelled'],
+  [edgeText.includes('5/8 张卡热降频'), 'throttle warning is not rendered in Chinese'],
+  [!edgeText.includes('throttled:5/8_thermal'), 'raw throttle code leaked into the UI'],
+  [edgeText.includes('降频'), 'throttle tag has no text'],
+  [edgeText.includes('未知用户'), 'unresolved process owner is not labelled'],
   [
-    countOf('gpu-row', edgeHtml) === 4,
-    `edge case rendered ${countOf('gpu-row', edgeHtml)} rows, expected 3 (one per card)`,
+    countOf('gpu-row', edgeView) === 4,
+    `edge case rendered ${countOf('gpu-row', edgeView)} rows, expected 3 (one per card)`,
   ],
   [!edgeHtml.includes('undefined') && !edgeHtml.includes('NaN'), 'edge markup contains undefined/NaN'],
   // expanded detail
-  [['alice', 'bob', 'carol'].every((u) => expandedHtml.includes(u)), 'expanded table is missing a user'],
+  [['alice', 'bob', 'carol'].every((u) => expandedText.includes(u)), 'expanded table is missing a user'],
   // The expanded table has a column titled PID, so the value is rendered bare;
   // only the inline row summary prefixes it with '#'.
   [
-    ['111111', '222222', '333333'].every((p) => expandedHtml.includes(p)),
+    ['111111', '222222', '333333'].every((p) => expandedText.includes(p)),
     'expanded table is missing a PID',
   ],
-  [expandedHtml.includes('python train.py'), 'expanded table is missing the process name'],
+  [expandedText.includes('python train.py'), 'expanded table is missing the process name'],
 ];
 for (const [ok, label] of edgeChecks) check(ok, label);
 
@@ -415,4 +542,4 @@ if (failures.length) {
   for (const f of failures.slice(0, 20)) console.error(`  - ${f}`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);
 }
-console.log('\nSSR render check PASSED');
+console.log('\nrender check PASSED');

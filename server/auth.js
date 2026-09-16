@@ -86,10 +86,26 @@ export class Auth {
 
     const expiry = token.slice(0, dot);
     const signature = token.slice(dot + 1);
-    const expected = createHmac('sha256', this.secret).update(expiry).digest('hex');
 
-    if (signature.length !== expected.length) return false;
-    if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return false;
+    // Compare HEX DIGESTS, not the raw strings.
+    //
+    // `signature.length` counts UTF-16 code units while `timingSafeEqual`
+    // compares BYTE lengths, and HTTP headers arrive latin-1 decoded. A cookie
+    // whose signature is 64 characters with one byte >= 0x80 therefore passed
+    // the old `signature.length !== expected.length` guard (64 === 64) while
+    // encoding to 65 UTF-8 bytes, and timingSafeEqual threw
+    // "Input buffers must have the same byte length" -- turning a bad cookie
+    // into a 500 instead of a clean "not logged in".
+    //
+    // Decoding both sides as hex makes the buffers exactly 32 bytes by
+    // construction, so the lengths can never disagree.
+    if (!/^[0-9a-f]{64}$/i.test(signature)) return false;
+    const given = Buffer.from(signature, 'hex');
+    const expected = Buffer.from(
+      createHmac('sha256', this.secret).update(expiry).digest('hex'),
+      'hex',
+    );
+    if (!timingSafeEqual(given, expected)) return false;
 
     const expiresAt = Number(expiry);
     return Number.isFinite(expiresAt) && expiresAt > now;

@@ -544,6 +544,8 @@ test('auth accepts a sha256 digest and never needs the plaintext', () => {
 });
 
 test('session tokens round-trip and expire', () => {
+  // Relies on the helper's 12-hour default: the assertions below probe +11h and
+  // +13h, so forcing a shorter session here breaks them.
   const auth = authWith({ password: 'x' });
   const now = 1_000_000;
   const token = auth.issueToken(now);
@@ -1079,4 +1081,41 @@ test('throttle warnings separate thermal from power capping', () => {
   assert.deepEqual(throttleWarnings({ gpus: gpus([null, null]) }), []);
   assert.deepEqual(throttleWarnings(null), []);
   assert.deepEqual(throttleWarnings({ gpus: [] }), []);
+});
+
+test('a malformed session cookie is rejected, never thrown on', () => {
+  // Regression: `signature.length` counts UTF-16 units while timingSafeEqual
+  // compares byte lengths, and HTTP headers arrive latin-1 decoded. A signature
+  // of 64 characters containing one byte >= 0x80 passed the length guard but
+  // encoded to 65 bytes, so timingSafeEqual threw -- a bad cookie produced a
+  // 500 instead of a clean "not logged in".
+  const auth = authWith({ password: 'x', sessionHours: 1 });
+  const now = Date.now();
+
+  const attacks = [
+    '',
+    'no-dot',
+    '.onlysignature',
+    'expiry.',
+    `123.${'a'.repeat(63)}\u00c3`, // 64 chars, 65 UTF-8 bytes -- the actual crash
+    `123.${'a'.repeat(64)}`,
+    `123.${'中'.repeat(64)}`,
+    `123.${'a'.repeat(63)}`, // wrong length but valid hex characters
+    `123.${'g'.repeat(64)}`, // right length, not hex
+    'notanumber.deadbeef',
+  ];
+
+  for (const bad of attacks) {
+    let result;
+    assert.doesNotThrow(() => {
+      result = auth.verifyToken(bad, now);
+    }, `verifyToken threw on ${JSON.stringify(bad).slice(0, 40)}`);
+    assert.equal(result, false, `accepted a forged token: ${JSON.stringify(bad).slice(0, 40)}`);
+  }
+
+  // A genuine token still verifies, and still expires.
+  const good = auth.issueToken(now);
+  assert.equal(auth.verifyToken(good, now), true);
+  // sessionHours is 1, so two hours later it must be refused.
+  assert.equal(auth.verifyToken(good, now + 2 * 3600_000), false, 'expired token accepted');
 });

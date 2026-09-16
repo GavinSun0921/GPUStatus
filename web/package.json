@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "check:render": "vite build --ssr src/ssr-check.tsx --outDir dist-ssr && node dist-ssr/ssr-check.js",
+    "check:render": "vite build --ssr src/render-check.tsx --outDir dist-ssr && node dist-ssr/render-check.js",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,9 +18,13 @@
     "recharts": "^3.10.1"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/jsdom": "^30.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.3",
     "vite": "^8.3.0"
   }

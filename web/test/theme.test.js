@@ -1,9 +1,18 @@
 /**
  * Frontend invariants that are easy to break silently.
  *
- * These guard failures that produce no error at runtime: a hardcoded colour
- * simply looks wrong in one theme, and a mismatched storage key silently means
- * the wrong theme flashes on load.
+ * Only two things live here, and both compare ARTEFACTS that must agree rather
+ * than grepping source for expected strings:
+ *
+ *   1. the pre-paint theme script and the React hook share a storage key
+ *   2. colours come from antd tokens, so one theme switch updates everything
+ *
+ * Three tests were removed from this file because they asserted that certain
+ * TEXT existed in a source file -- `App.tsx` contains `darkAlgorithm`,
+ * `severity.ts` contains `colorSuccess`, `Machine.tsx` contains
+ * `host.group !== site`. Those pass or fail on refactoring rather than on
+ * behaviour, and they duplicate what the render check now proves for real by
+ * rendering under both theme algorithms and reading the tokens antd publishes.
  *
  * Run with: npm test
  */
@@ -41,15 +50,6 @@ test('the pre-paint theme script and theme.ts agree on the storage key', () => {
   assert.match(read('index.html'), /dataset\.theme/);
 });
 
-test('both antd theme algorithms are wired up', () => {
-  // Without this the light/dark switch would toggle its own label while the
-  // page stayed on one algorithm -- a silent no-op.
-  const app = read('src/App.tsx');
-  assert.match(app, /darkAlgorithm/, 'App.tsx never selects antd darkAlgorithm');
-  assert.match(app, /defaultAlgorithm/, 'App.tsx never selects antd defaultAlgorithm');
-  assert.match(app, /ConfigProvider/, 'App.tsx does not use ConfigProvider');
-});
-
 test('no hardcoded colours outside the theme layer', () => {
   // Colour must come from antd tokens (severity.ts) so that switching theme
   // updates everything. A literal like #f0f0f0 looks correct in light mode and
@@ -66,29 +66,4 @@ test('no hardcoded colours outside the theme layer', () => {
   }
 
   assert.deepEqual(offenders, [], `hardcoded colours found:\n  ${offenders.join('\n  ')}`);
-});
-
-test('severity colours are resolved from antd tokens, not literals', () => {
-  // The single place colours are decided.
-  const severity = read('src/severity.ts');
-  assert.match(severity, /useToken\(\)/, 'severity.ts does not read antd tokens');
-  for (const token of ['colorSuccess', 'colorWarning', 'colorError', 'colorPrimary']) {
-    assert.match(severity, new RegExp(token), `severity.ts does not map ${token}`);
-  }
-});
-
-test('the lab name is rendered in the header, not per machine', () => {
-  // `site` identifies the installation, so it is shown once in the page header.
-  // It previously appeared as a group tag on every machine card.
-  const app = read('src/App.tsx');
-  assert.match(app, /snapshot\?\.site/, 'App.tsx does not render the site name');
-  assert.match(app, /document\.title/, 'browser title is not set');
-
-  // The machine card must suppress a group that merely repeats the site name.
-  const machine = read('src/components/Machine.tsx');
-  assert.match(
-    machine,
-    /host\.group !== site/,
-    'Machine.tsx would repeat the site name as a per-machine group tag',
-  );
 });

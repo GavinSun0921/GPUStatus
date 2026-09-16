@@ -834,7 +834,7 @@ GPUStatus/
 │   │   ├── {api,format,types,theme}.ts, App.tsx, main.tsx, styles.css
 │   │   ├── components/
 │   │   ├── HistoryView.tsx        # Machine / Overview / Reports / AdminView
-│   │   └── ssr-check.tsx      # 渲染冒烟测试(npm run check:render)
+│   │   └── render-check.tsx   # 渲染冒烟测试(npm run check:render)
 │   └── test/theme.test.js     # 主题与 CSS 变量不变量测试(npm test)
 ├── tools/screenshot.mjs       # 截图工具(npm run screenshot)
 ├── deploy/gpustatus.service   # systemd 单元
@@ -893,20 +893,30 @@ npm run typecheck                 # 前端 TypeScript 类型检查
 npm run check:render              # ★ 渲染冒烟测试(需要后端正在运行)
 ```
 
-`check:render` 会**从正在运行的后端拉取真实快照**,用 `react-dom/server` 把
-`Overview` / `UsersView`(即 `Machine` 整棵数据渲染树)渲染成 HTML,然后断言:
+`check:render` 会**从正在运行的后端拉取真实快照**,把 `Overview` / `UsersView`
+(即 `Machine` 整棵数据渲染树)渲染进 **jsdom**,然后对真实 DOM 做断言:
 
-- 每台机器渲染出一段 `.machine`,每张卡渲染出一行 `#n`(每机 8 张)
-- 每个用户名都出现在 HTML 里
+- 每台机器一张卡片,每张卡一行(按机器数、卡数核对)
+- 序号单元格 / 型号单元格 / 磁盘方块 / 网络挂载块 / 用户行的**数量**
+- 每个用户名、型号名都出现在**可见文本**里
+- 可展开行、降频标记、边界场景(idle 卡、一卡三人、进程属主丢失)
 - 输出中不含 `undefined` / `NaN` / `[object Object]`
+- 两套主题算法产出的 `--ant-color-bg-container` 不同,且暗色确实更暗
 
 类型检查和接口字段比对只能证明"结构对得上",只有真正渲染一遍才能证明组件
-**遇到真实数据不会崩**。这是自动化验证里唯一覆盖到"组件运行时"的一环。
+**遇到真实数据不会崩**。
 
-`npm test` 里前端那部分盯的是**不会报错、但会静默出错**的问题:
+> **这里原本是渲染成 HTML 字符串再用 `countOf('gpu-row')` 数字符串出现次数。**
+> 那个做法错得很实在:给行再加一个 `gpu-row-expandable` 类之后,每行被数成两次
+> (48 行报成 95 行);类名叫 `cell-model-REMOVED` 也照样能匹配上 `cell-model`。
+> 两次都真的发生过。换成元素查询后,这两个失败模式从根上不存在。
 
-- 两套主题是否定义了**完全相同**的 CSS 变量(少一个不会报错,只会在另一个主题下
-  变成继承来的怪颜色)
-- 代码里 `var(--x)` 引用到的变量是否**两套主题里都有**
-- `index.html` 的预绘制脚本和 `theme.ts` 的 `localStorage` key 是否一致
-  (不一致的表现是"用户保存的主题选择被忽略",同样不报错)
+`npm test` 里前端那部分只留**比对两件必须一致的产物**的测试:
+`index.html` 的预绘制脚本和 `theme.ts` 的 `localStorage` key 是否一致
+(不一致的表现是"用户保存的主题选择被忽略",不报错),以及颜色是否都来自
+antd token。
+
+> 这里删掉过三个测试,它们断言的是**源码里存在某段文字**——`App.tsx` 里有
+> `darkAlgorithm`、`severity.ts` 里有 `colorSuccess`、`Machine.tsx` 里有
+> `host.group !== site`。这种测试会因为**重构**而失败,不会因为**行为坏了**而失败。
+> 同样的保证现在由渲染检查真实渲染两套主题来提供。
