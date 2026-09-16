@@ -844,6 +844,43 @@ gpu19   87°C   3 张卡近期热降频  ← 已经在降频
 于是配置里排第一的 gpu03 显示在最后 —— 更糟的是**重启一下顺序又变了**,因为启动时是
 按配置顺序建的。现在每次重载都按配置顺序重建,已存在机器的运行状态按引用复用,不受影响。)
 
+### 部署机连不上 GitHub 时怎么更新
+
+**症状**:`git pull` 卡住不动,没有任何报错。
+
+**诊断结论(mgmt2 实测)**:`github.com` 的 HTTPS 被 **SNI 阻断**。
+
+| 测试 | 结果 |
+|---|---|
+| `curl https://github.com/` | 超时(000),无响应 |
+| 换 3 个不同 IP `--resolve github.com:443:...` | **全部同样超时** ← 说明不是 IP 被封 |
+| TCP 连 `github.com:443` | ✓ 通 ← 连接能建立,TLS 握手才被掐 |
+| `ssh -T git@github.com` | ✓ 握手成功 |
+| `ssh -T -p 443 git@ssh.github.com` | ✓ 握手成功 |
+| `codeload.github.com` 下载 tarball | ✓ 200,230KB,1.8s |
+
+**首选解法:改用 SSH 传输**(HTTPS 走不通但 SSH 通):
+
+```bash
+git remote set-url origin git@github.com:GavinSun0921/GPUStatus.git
+# ~/.ssh/config 里加(443 是 GitHub 为受限网络提供的入口):
+#   Host github.com
+#     HostName ssh.github.com
+#     Port 443
+#     User git
+```
+
+需要把部署机的公钥加成仓库的 **Deploy key**(只读即可,仓库是公开的)。
+
+**后备解法**:部署机完全连不上时,从开发机中转:
+
+```bash
+tools/offline-update.sh mgmt2 --build
+```
+
+它只传目标缺失的提交(`git bundle` 增量,实测约 10KB),目标机保留完整 git 历史 ——
+是"从文件 fetch",不是在检出上覆盖文件。
+
 ### 改配置会自动生效,不用重启
 
 `config/hosts.json` 被监听:保存后约 0.4 秒自动重载,日志里出现
