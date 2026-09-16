@@ -171,6 +171,46 @@ const THERMAL_BITS = 0x020 | 0x040;
  */
 const THERMAL_MIN_SAMPLES = 20;
 
+/**
+ * How long a GPU-count drop is held against the machine.
+ *
+ * The card count on this cluster is NOT a constant: all machines are physically
+ * 8-GPU, and cards that cannot run jobs are deliberately masked off after boot,
+ * so the visible count legitimately varies and can change when the operator
+ * adjusts the masking.
+ *
+ * That makes a fixed `expect_gpus` the wrong tool -- it is stale the moment the
+ * masking changes, and it fires on the boot-time 8 -> 6 transition, which is
+ * intended. So the reference is the machine's own recent high-water mark
+ * instead: a drop below what this machine has recently had is worth reporting,
+ * and a deliberate masking change stops being reported once the old, higher
+ * count ages out of the window.
+ *
+ * The trade-off, stated plainly: after `GPU_COUNT_MEMORY_MS` a card that died
+ * is no longer warned about. It stays in the event log, which is where a
+ * permanent record belongs -- a red badge that never clears is the thing people
+ * learn to ignore.
+ */
+const GPU_COUNT_MEMORY_MS = 2 * 3600_000;
+
+/**
+ * `expect_gpus` from the config still wins when it is set: that is an explicit
+ * statement of intent, and it should not be second-guessed.
+ */
+export function gpuCountWarning(sample, history, expectGpus) {
+  if (!sample || !Array.isArray(sample.gpus) || sample.gpus.length === 0) return null;
+  const seen = sample.gpus.length;
+
+  if (typeof expectGpus === 'number' && seen !== expectGpus) {
+    return `gpu_count_mismatch:expected_${expectGpus}_saw_${seen}`;
+  }
+  if (!history || history.length === 0) return null;
+
+  const high = Math.max(...history.map((h) => h.count));
+  if (seen < high) return `gpu_count_dropped:from_${high}_to_${seen}`;
+  return null;
+}
+
 export const STATUS = {
   UNKNOWN: 'unknown',
   OK: 'ok',
@@ -255,6 +295,23 @@ export class State {
    * transitions are reported, so the event log cannot miss one regardless of
    * whether the change was caused by a poll result or by the passage of time.
    */
+  /**
+   * Report a one-off event through the same channel as status transitions.
+   *
+   * Reusing the path means the event log cannot miss it and the UI is pushed
+   * the same way -- a second mechanism would be a second thing to keep working.
+   */
+  #emitEvent(entry, ts, kind, message) {
+    const transition = { hostId: entry.host.id, kind, from: null, to: null, message, ts };
+    for (const fn of this.transitionHandlers) {
+      try {
+        fn(transition, entry);
+      } catch {
+        // A broken handler must not stop the poller.
+      }
+    }
+  }
+
   onTransition(fn) {
     this.transitionHandlers.add(fn);
     return () => this.transitionHandlers.delete(fn);
@@ -287,6 +344,27 @@ export class State {
     entry.totalPolls += 1;
 
     if (result.ok && result.sample) {
+      // Recent GPU counts, for the drop check above.
+      entry.gpuCounts = entry.gpuCounts ?? [];
+      const seenCount = (result.sample.gpus ?? []).length;
+      if (seenCount > 0) {
+        entry.gpuCounts.push({ ts: result.sample.ts, count: seenCount });
+        const cutoff = result.sample.ts - GPU_COUNT_MEMORY_MS;
+        while (entry.gpuCounts.length > 0 && entry.gpuCounts[0].ts < cutoff) entry.gpuCounts.shift();
+        // A change in either direction is a fact worth keeping: "this machine
+        // used to show 8 cards and now shows 6" is the question an operator
+        // asks, and it belongs in the log rather than in a badge.
+        if (entry.lastGpuCount !== undefined && entry.lastGpuCount !== seenCount) {
+          this.#emitEvent(
+            entry,
+            result.sample.ts,
+            'gpu_count_changed',
+            `显卡数量 ${entry.lastGpuCount} -> ${seenCount}`,
+          );
+        }
+        entry.lastGpuCount = seenCount;
+      }
+
       entry.thermal = entry.thermal ?? new Map();
       for (const gpu of result.sample.gpus ?? []) {
         const mask = gpu.throttleMask;
@@ -489,7 +567,13 @@ export class State {
       // clock. Without this the machine looks "正常" while delivering a fraction
       // of its performance. (Found exactly that on Server19: 5 of 8 cards in
       // thermal slowdown at 930 MHz against a 3105 MHz maximum.)
-      warnings: [...entry.lastWarnings, ...throttleWarnings(latest, entry.thermal)],
+      warnings: [
+        ...entry.lastWarnings,
+        ...throttleWarnings(latest, entry.thermal),
+        // Fixed `expect_gpus` still wins when configured; otherwise this compares
+        // against the machine's own recent high-water mark.
+        ...[gpuCountWarning(latest, entry.gpuCounts, h.expectGpus)].filter(Boolean),
+      ],
       stale: latest === null,
 
       hostname: latest?.hostname ?? null,
@@ -579,6 +663,10 @@ export class State {
         pcie_width: g.pcieWidth ?? null,
         pcie_gen_max: g.pcieGenMax ?? null,
         pcie_width_max: g.pcieWidthMax ?? null,
+        // Stable identity: the index is positional and shifts when cards are
+        // masked off, so anything that has to survive a masking change must key
+        // on this instead.
+        bus_id: g.busId ?? null,
         n_procs: g.nProcs,
         // Health telemetry. `throttled` is the bit a duty operator needs to
         // see; `throttle_reasons` explains it on hover.

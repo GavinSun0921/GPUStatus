@@ -13,7 +13,7 @@ import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeCon
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { Db, aggregateUserUsage } from '../db.js';
 import { AdminConfigSchema } from '../../shared/schema.ts';
-import { State, decodeThrottle, displayGpuName, thermalShare, throttleWarnings } from '../state.js';
+import { State, decodeThrottle, displayGpuName, gpuCountWarning, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
 import { createHash } from 'node:crypto';
@@ -436,7 +436,14 @@ test('deriveSample joins uuid, pmon and pid_users into per-process rows', () => 
   assert.deepEqual(sample.warnings, []);
 });
 
-test('deriveSample warns on a GPU count mismatch instead of silently accepting', () => {
+test('deriveSample no longer decides whether the card count is wrong', () => {
+  // The check used to live here and compared against the config's expect_gpus.
+  // It moved to State (see gpuCountWarning) because on this cluster the visible
+  // count legitimately changes -- cards are masked off after boot -- so it has
+  // to compare against the machine's own recent high-water mark.
+  //
+  // What this asserts is the layering: the collector reports what it SAW, and
+  // does not invent a verdict about it.
   const raw = {
     ts: Math.floor(Date.now() / 1000),
     cpu: { ticks: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
@@ -448,7 +455,11 @@ test('deriveSample warns on a GPU count mismatch instead of silently accepting',
     errors: [],
   };
   const sample = deriveSample({ id: 'n1', expectGpus: 8 }, raw, null, Date.now());
-  assert.ok(sample.warnings.includes('gpu_count_mismatch:expected_8_saw_1'));
+  assert.equal(sample.gpus.length, 1, 'the collector did not report what it saw');
+  assert.ok(
+    !sample.warnings.some((w) => w.startsWith('gpu_count_')),
+    'the collector is still deciding the card count is wrong; that belongs to State',
+  );
 });
 
 test('deriveSample flags processes whose owner could not be resolved', () => {
@@ -1195,4 +1206,45 @@ test('a sample with a missing metric does not lose the whole hourly row', () => 
   assert.equal(row.cpu_n, 1, 'an unmeasurable CPU reading was counted as a sample');
   assert.equal(row.cpu_sum / row.cpu_n, 12.5);
   db.close();
+});
+
+test('the card-count check compares against the machine, not a config constant', () => {
+  // On this cluster every machine is physically an 8-GPU box, and cards that
+  // cannot run jobs are DELIBERATELY masked off after boot. So the visible count
+  // both varies and changes when the operator adjusts the masking -- which made
+  // a fixed expect_gpus fire on the boot-time 8 -> 6 transition, i.e. on
+  // intended behaviour.
+  const gpus = (n) => ({ gpus: Array.from({ length: n }, (_, i) => ({ index: i })) });
+  const history = (...counts) => counts.map((count, i) => ({ ts: i, count }));
+
+  // No expectation configured: compare against this machine's own recent high.
+  assert.equal(gpuCountWarning(gpus(6), history(6, 6, 6), null), null, 'steady state warned');
+  // A drop below what this machine has recently had IS worth reporting.
+  assert.equal(
+    gpuCountWarning(gpus(5), history(6, 6, 6), null),
+    'gpu_count_dropped:from_6_to_5',
+  );
+  // The boot-time transition (8 visible, then masked to 6) is intended, so once
+  // the higher count has aged out of the window it stops being reported.
+  assert.equal(gpuCountWarning(gpus(6), history(6, 6, 6), null), null);
+  // ...but while it is still in the window it is reported, because the machine
+  // really did use to have more.
+  assert.equal(gpuCountWarning(gpus(6), history(8, 6), null), 'gpu_count_dropped:from_8_to_6');
+
+  // An explicit expect_gpus overrides the baseline entirely -- that is the
+  // operator stating intent, and it should not be second-guessed.
+  assert.equal(
+    gpuCountWarning(gpus(6), history(6, 6), 6),
+    null,
+    'an explicit expectation was overridden by the baseline',
+  );
+  assert.equal(
+    gpuCountWarning(gpus(8), history(6, 6), 6),
+    'gpu_count_mismatch:expected_6_saw_8',
+    'an explicit expectation was not enforced',
+  );
+
+  // A machine with no cards reporting is not a count change.
+  assert.equal(gpuCountWarning({ gpus: [] }, history(6), null), null);
+  assert.equal(gpuCountWarning(null, history(6), null), null);
 });

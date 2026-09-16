@@ -60,6 +60,10 @@ export function clock(ts: number | null | undefined): string {
 export function warningLabel(code: string): string {
   if (code.startsWith('probe:')) return `采集告警: ${code.slice(6)}`;
   if (code.startsWith('nvidia:')) return `nvidia-smi: ${code.slice(7)}`;
+  if (code.startsWith('gpu_count_dropped:')) {
+    const m = /from_(\d+)_to_(\d+)/.exec(code);
+    return m ? `显卡数量从 ${m[1]} 降到 ${m[2]}` : '显卡数量下降';
+  }
   if (code.startsWith('gpu_count_mismatch:')) {
     const m = /expected_(\d+)_saw_(\d+)/.exec(code);
     return m ? `显卡数量异常: 预期 ${m[1]} 张,实际 ${m[2]} 张` : '显卡数量异常';

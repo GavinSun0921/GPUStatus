@@ -184,12 +184,15 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
       pcieWidth: num(g.pcie_width),
       pcieGenMax: num(g.pcie_gen_max),
       pcieWidthMax: num(g.pcie_width_max),
+      // e.g. "37:00.0" -- the physical slot, stable across masking
+      busId: g.bus_id && g.bus_id !== 'null' ? String(g.bus_id) : null,
     }))
     .sort((a, b) => a.index - b.index);
 
-  if (host.expectGpus !== null && gpus.length !== host.expectGpus) {
-    warnings.push(`gpu_count_mismatch:expected_${host.expectGpus}_saw_${gpus.length}`);
-  }
+  // The card-count check lives in State, not here: on this cluster the visible
+  // count legitimately varies (cards are masked off after boot), so it compares
+  // against the machine's own recent high-water mark rather than a config
+  // constant. See gpuCountWarning().
 
   // --- memory ---------------------------------------------------------------
   // `used` is derived from MemAvailable, not MemFree: page cache is reclaimable,

@@ -176,6 +176,7 @@ export class Db {
       ['gpu_sample', 'sm_clock_max_mhz', 'REAL'],
       ['gpu_sample', 'power_limit_w', 'REAL'],
       ['gpu_sample', 'pstate', 'TEXT'],
+      ['gpu_sample', 'bus_id', 'TEXT'],
     ];
     for (const [table, column, type] of additions) {
       const existing = this.db.prepare(`PRAGMA table_info(${table})`).all();
@@ -470,7 +471,12 @@ export class Db {
         sm_clock_mhz     REAL,
         sm_clock_max_mhz REAL,
         power_limit_w    REAL,
-        pstate           TEXT
+        pstate           TEXT,
+        -- Physical PCI slot, e.g. "37:00.0". The GPU INDEX is positional and
+        -- shifts whenever cards are masked off, so it cannot identify a card
+        -- across time; the slot can, and it is what you would use to find the
+        -- card in the chassis.
+        bus_id           TEXT
       );
       -- Indexed on ts, because the only statement that reads this table in bulk
       -- is the retention prune (WHERE ts < cutoff). It used to carry
@@ -594,8 +600,8 @@ export class Db {
       insGpuSample: this.db.prepare(`
         INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
           mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
-          throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+          throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate, bus_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 
       insProcSample: this.db.prepare(`
         INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username,
@@ -722,7 +728,7 @@ export class Db {
           n(g.memUsedMib), n(g.memTotalMib), n(g.memUtil), n(g.tempC), n(g.powerW),
           n(g.fanPct), n(g.nProcs),
           n(g.throttleMask), n(g.smClockMhz), n(g.smClockMaxMhz), n(g.powerLimitW),
-          s(g.pstate),
+          s(g.pstate), s(g.busId),
         );
       }
 

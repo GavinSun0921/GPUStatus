@@ -87,7 +87,7 @@ else
   # by two. A card that has trained down to x4 or Gen1 runs slower while every
   # other metric -- utilisation, temperature, power -- looks perfectly normal,
   # which makes it invisible without this.
-  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed,clocks_throttle_reasons.active,clocks.current.sm,clocks.max.sm,power.limit,pstate,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max'
+  GPU_FIELDS='index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,utilization.memory,fan.speed,clocks_throttle_reasons.active,clocks.current.sm,clocks.max.sm,power.limit,pstate,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,pci.bus_id'
 
   # !! nvidia-smi prints NVML failures to STDOUT while exiting non-zero, so the
   # exit code must be honoured -- otherwise the error text would be parsed as a
@@ -510,31 +510,37 @@ section == "GPU" {
   if ($0 == "") next
   n = split($0, f, ",")
   # 15 fields now; below this the trailing-index reads would silently misalign.
-  if (n < 19) next
+  if (n < 20) next
   k = ++ngpu
   gpu_index[k] = num(f[1])
   gpu_uuid[k]  = trim(f[2])
-  gpu_name[k]  = trim(join(f, 3, n - 16))
-  gpu_util[k]  = num(f[n - 15])
-  gpu_memused[k] = num(f[n - 14])
-  gpu_memtotal[k] = num(f[n - 13])
-  gpu_temp[k]  = num(f[n - 12])
-  gpu_power[k] = num(f[n - 11])
-  gpu_memutil[k] = num(f[n - 10])
-  gpu_fan[k]   = num(f[n - 9])
+  gpu_name[k]  = trim(join(f, 3, n - 17))
+  gpu_util[k]  = num(f[n - 16])
+  gpu_memused[k] = num(f[n - 15])
+  gpu_memtotal[k] = num(f[n - 14])
+  gpu_temp[k]  = num(f[n - 13])
+  gpu_power[k] = num(f[n - 12])
+  gpu_memutil[k] = num(f[n - 11])
+  gpu_fan[k]   = num(f[n - 10])
   # Throttle bitmask arrives as hex (0x0000000000000020); strtonum needs the
   # leading 0x, and a non-numeric value must not become 0 ("not throttled").
-  gpu_throttle[k] = hexnum(trim(f[n - 8]))
-  gpu_smclock[k]  = num(f[n - 7])
-  gpu_smclockmax[k] = num(f[n - 6])
-  gpu_powerlimit[k] = num(f[n - 5])
-  gpu_pstate[k] = trim(f[n - 4])
+  gpu_throttle[k] = hexnum(trim(f[n - 9]))
+  gpu_smclock[k]  = num(f[n - 8])
+  gpu_smclockmax[k] = num(f[n - 7])
+  gpu_powerlimit[k] = num(f[n - 6])
+  gpu_pstate[k] = trim(f[n - 5])
   # Width is the degradation signal that can be trusted: a PCIe link
   # renegotiates its GENERATION down when the card is idle, but not its width.
-  gpu_pciegen[k]      = num(f[n - 3])
-  gpu_pciewidth[k]    = num(f[n - 2])
-  gpu_pciegenmax[k]   = num(f[n - 1])
-  gpu_pciewidthmax[k] = num(f[n])
+  gpu_pciegen[k]      = num(f[n - 4])
+  gpu_pciewidth[k]    = num(f[n - 3])
+  gpu_pciegenmax[k]   = num(f[n - 2])
+  gpu_pciewidthmax[k] = num(f[n - 1])
+  # pci.bus_id looks like "00000000:34:00.0"; the domain prefix is always zero
+  # on these machines, so the short "34:00.0" is what a person recognises as the
+  # physical slot -- and the slot does NOT move when cards are masked, unlike the
+  # index.
+  gpu_busid[k] = trim(f[n])
+  sub(/^[0-9a-fA-F]+:/, "", gpu_busid[k])
   next
 }
 
@@ -611,11 +617,12 @@ END {
 
   printf "  \"gpus\": ["
   for (i = 1; i <= ngpu; i++) {
-    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s, \"throttle\": %s, \"sm_clock_mhz\": %s, \"sm_clock_max_mhz\": %s, \"power_limit_w\": %s, \"pstate\": %s, \"pcie_gen\": %s, \"pcie_width\": %s, \"pcie_gen_max\": %s, \"pcie_width_max\": %s}",
+    printf "%s\n    {\"index\": %s, \"uuid\": %s, \"name\": %s, \"util\": %s, \"mem_used_mib\": %s, \"mem_total_mib\": %s, \"mem_util\": %s, \"temp_c\": %s, \"power_w\": %s, \"fan_pct\": %s, \"throttle\": %s, \"sm_clock_mhz\": %s, \"sm_clock_max_mhz\": %s, \"power_limit_w\": %s, \"pstate\": %s, \"pcie_gen\": %s, \"pcie_width\": %s, \"pcie_gen_max\": %s, \"pcie_width_max\": %s, \"bus_id\": %s}",
       (i > 1 ? "," : ""), gpu_index[i], str(gpu_uuid[i]), str(gpu_name[i]), gpu_util[i],
       gpu_memused[i], gpu_memtotal[i], gpu_memutil[i], gpu_temp[i], gpu_power[i], gpu_fan[i],
       gpu_throttle[i], gpu_smclock[i], gpu_smclockmax[i], gpu_powerlimit[i], str(gpu_pstate[i]),
-      gpu_pciegen[i], gpu_pciewidth[i], gpu_pciegenmax[i], gpu_pciewidthmax[i]
+      gpu_pciegen[i], gpu_pciewidth[i], gpu_pciegenmax[i], gpu_pciewidthmax[i],
+      str(gpu_busid[i])
   }
   printf "%s  ],\n", (ngpu > 0 ? "\n" : "")
 

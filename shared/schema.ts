@@ -76,6 +76,14 @@ export const GpuSchema = z.object({
   pcie_width: num,
   pcie_gen_max: num,
   pcie_width_max: num,
+  /**
+   * Physical PCI slot, e.g. "37:00.0" -- the STABLE identifier for a card.
+   *
+   * `index` is positional: masking a card off renumbers the rest, so "#3" can
+   * be a different physical card before and after. The slot never moves, and it
+   * is what you would use to find the card in the chassis.
+   */
+  bus_id: str,
   /** nvidia-smi clocks_throttle_reasons bitmask; null when not reported */
   throttle_mask: num,
   /** decoded reason names, e.g. ['热降频'] */

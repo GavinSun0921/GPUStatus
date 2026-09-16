@@ -201,8 +201,8 @@ check(
 // One index cell and one model cell per card -- independent of row count, so a
 // column dropped from the table is caught even if the rows still render.
 check(
-  countOf('cell-index') === expectedGpus,
-  `rendered ${countOf('cell-index')} GPU index cells, expected ${expectedGpus}`,
+  countOf('cell-bus') === expectedGpus,
+  `rendered ${countOf('cell-bus')} PCI-slot cells, expected ${expectedGpus}`,
 );
 check(
   countOf('cell-model') === expectedGpus,
@@ -374,7 +374,7 @@ check(
 // --- report -----------------------------------------------------------------
 console.log(`hosts rendered     : ${snapshot.hosts.length} (${machines} cards)`);
 console.log(`GPU rows rendered  : ${gpuRows} (expected ${expectedGpus})`);
-console.log(`index/model cells  : ${countOf('cell-index')} / ${countOf('cell-model')}`);
+console.log(`slot/model cells   : ${countOf('cell-bus')} / ${countOf('cell-model')}`);
 console.log(`disk tiles         : ${countOf('disk-tile')} (expected ${expectedDisks}, selected only)`);
 console.log(`net-mount blocks   : ${countOf('net-tile')} (expected ${expectedNetMounts})`);
 console.log(`user rows          : ${countOf('user-row')} (expected ${snapshot.users.length})`);
@@ -423,6 +423,7 @@ const card = (
   sm_clock_max_mhz: 2520,
   power_limit_w: 450,
   pstate: 'P0',
+  bus_id: `0${index}:00.0`,
   ...overrides,
 });
 
