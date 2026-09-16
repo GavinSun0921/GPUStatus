@@ -3,7 +3,7 @@ import { Card, Segmented, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { useJson } from '../api';
-import type { EventRow, Snapshot, UsageTotalsRow } from '../types';
+import type { EventRow, HostUserProc, Snapshot, UsageTotalsRow } from '../types';
 import { clock, duration, gib } from '../format';
 import { useSeverityColors, severity } from '../severity';
 
@@ -290,19 +290,68 @@ export function UsersView({ snapshot }: { snapshot: Snapshot }) {
             // inputs, where a click is meant for the field, not the row.
             expandRowByClick: true,
             expandedRowRender: (u) => (
-              <Table
-                size="small"
-                rowKey={(p) => `${p.hostId}-${p.pid}`}
-                pagination={false}
-                dataSource={u.hosts.flatMap((h) => {
+              <UserProcTable
+                rows={u.hosts.flatMap((h) => {
                   const host = snapshot.hosts.find((x) => x.id === h.id);
                   const procs = host?.users.find((x) => x.username === u.username)?.procs ?? [];
                   return procs.map((p) => ({ ...p, hostId: h.id, hostLabel: h.label }));
                 })}
-                columns={[
+              />
+            ),
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+/**
+ * One user's processes across every machine they are on.
+ *
+ * Exported and given a plain `rows` prop rather than being written inline in
+ * `expandedRowRender`, so the render check can render it directly: an expanded
+ * row does not exist in a collapsed render, and a column added here would
+ * otherwise never be covered by a test. Same reason `ProcTable` is exported.
+ */
+type UserProcRow = HostUserProc & { hostId: string; hostLabel: string };
+
+export function UserProcTable({ rows }: { rows: UserProcRow[] }) {
+  const colors = useSeverityColors();
+
+  return (
+    <Table
+      size="small"
+      rowKey={(p) => `${p.hostId}-${p.pid}`}
+      pagination={false}
+      dataSource={rows}
+      columns={[
                   { title: '机器', dataIndex: 'hostLabel', width: 120 },
                   { title: 'GPU', dataIndex: 'gpu_index', width: 80, render: (i: number | null) => (i === null ? '—' : `${i}`) },
                   { title: 'PID', dataIndex: 'pid', width: 110, render: (p: number) => <Typography.Text code style={{ fontSize: 11.5 }}>{p}</Typography.Text> },
+                  {
+                    // Same reading as the machine table's column of the same
+                    // name, and for the same reason: a job that has been holding
+                    // a card for days is the usual reason a GPU looks busy while
+                    // nobody gets anything out of it. Without it, this table
+                    // showed what was running but not for how long, so a stuck
+                    // job and a fresh one looked identical.
+                    //
+                    // Sortable here (unlike on the machine page, where the
+                    // handful of rows need no ordering): with one row per
+                    // process across every machine, "oldest first" is how you
+                    // find the ones worth asking about.
+                    title: '已运行',
+                    dataIndex: 'elapsed_s',
+                    width: 104,
+                    align: 'right',
+                    sorter: (a, b) => (a.elapsed_s ?? 0) - (b.elapsed_s ?? 0),
+                    render: (secs: number | null) =>
+                      secs === null ? (
+                        <Typography.Text type="secondary">—</Typography.Text>
+                      ) : (
+                        <Typography.Text style={{ fontSize: 11.5 }}>{duration(secs)}</Typography.Text>
+                      ),
+                  },
                   {
                     title: '进程',
                     dataIndex: 'name',
@@ -320,12 +369,7 @@ export function UsersView({ snapshot }: { snapshot: Snapshot }) {
                     render: (v: number | null) =>
                       v === null ? '—' : <Typography.Text style={{ color: colors[severity(v)] }}>{Math.round(v)}%</Typography.Text>,
                   },
-                ]}
-              />
-            ),
-          }}
-        />
-      )}
-    </Card>
+      ]}
+    />
   );
 }

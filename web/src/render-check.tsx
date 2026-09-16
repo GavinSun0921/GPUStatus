@@ -85,7 +85,7 @@ const zhCN = (await import('antd/locale/zh_CN')).default;
 const { Overview } = await import('./components/Overview');
 const { ProcTable, CardTelemetry } = await import('./components/Machine');
 const { MachineInfo } = await import('./components/MachineInfo');
-const { UsersView } = await import('./components/Reports');
+const { UserProcTable, UsersView } = await import('./components/Reports');
 
 const API =
   // Minimal typed view of the Node global, declared locally so that this script
@@ -502,6 +502,17 @@ const edgeHtml = edgeView.innerHTML;
 const expandedView = renderView(<ProcTable gpu={sharedCard} />);
 const expandedText = expandedView.textContent ?? '';
 
+// The user page's per-process breakdown, likewise rendered directly: it lives in
+// an expanded row, which a collapsed render never produces.
+const userProcView = renderView(
+  <UserProcTable
+    rows={[
+      { hostId: 'h1', hostLabel: 'Server19', pid: 4242, name: 'train.py', gpu_index: 3, elapsed_s: 273_600, used_mem_mib: 40_000, sm_pct: 91 },
+    ]}
+  />,
+);
+const userProcText = userProcView.textContent ?? '';
+
 const edgeChecks: [boolean, string][] = [
   [edgeText.includes('空闲'), 'idle card does not render as 空闲'],
   // The real requirement: NO process may be elided. The UI used to render only
@@ -531,6 +542,16 @@ const edgeChecks: [boolean, string][] = [
     `edge case rendered ${countOf('gpu-row', edgeView)} rows, expected 3 (one per card)`,
   ],
   [!edgeHtml.includes('undefined') && !edgeHtml.includes('NaN'), 'edge markup contains undefined/NaN'],
+  // The user page's process table must say how long each job has been running.
+  // A job holding a card for days is the usual reason a GPU looks busy while
+  // nobody gets anything out of it -- and without this the table showed what was
+  // running but not for how long, so a stuck job looked like a fresh one.
+  [userProcText.includes('已运行'), 'user process table is missing the 已运行 column'],
+  // 273600s = 3d4h. Asserting the RENDERED duration, not just the header: a
+  // column whose cells are blank passes a header-only check.
+  [userProcText.includes('3d'), 'the 已运行 column renders no duration'],
+  [userProcText.includes('Server19'), 'user process table lost its host column'],
+
   // expanded detail
   [['alice', 'bob', 'carol'].every((u) => expandedText.includes(u)), 'expanded table is missing a user'],
   // The expanded table has a column titled PID, so the value is rendered bare;

@@ -432,6 +432,7 @@ export const MachineHistorySchema = z.object({
 export type GpuProc = z.infer<typeof GpuProcSchema>;
 export type Gpu = z.infer<typeof GpuSchema>;
 export type HostUser = z.infer<typeof HostUserSchema>;
+export type HostUserProc = z.infer<typeof HostUserProcSchema>;
 export type HostCpu = z.infer<typeof HostCpuSchema>;
 export type HostMem = z.infer<typeof HostMemSchema>;
 export type Disk = z.infer<typeof DiskSchema>;

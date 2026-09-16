@@ -19,6 +19,7 @@ export type {
   GpuProc,
   Gpu,
   HostUser,
+  HostUserProc,
   HostCpu,
   HostMem,
   Disk,
