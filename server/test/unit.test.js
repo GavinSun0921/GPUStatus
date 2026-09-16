@@ -705,7 +705,7 @@ test('host disk paths must be absolute', () => {
   const path = join(tmpdir(), `gpustatus-baddisk-${process.pid}.json`);
   try {
     writeFileSync(path, serializeConfig(bad), 'utf8');
-    assert.throws(() => loadConfig(path), /must be absolute/);
+    assert.throws(() => loadConfig(path), /必须是绝对路径/);
   } finally {
     rmSync(path, { force: true });
   }
@@ -780,7 +780,7 @@ test('disk_exclude must be an array', () => {
   const path = join(tmpdir(), `gpustatus-excl3-${process.pid}.json`);
   try {
     writeFileSync(path, JSON.stringify({ ...config, disk_exclude: 'nope', hosts: config.hosts }), 'utf8');
-    assert.throws(() => loadConfig(path), /disk_exclude must be an array/);
+    assert.throws(() => loadConfig(path), /必须是挂载点数组/);
   } finally {
     rmSync(path, { force: true });
   }
@@ -800,7 +800,7 @@ test('net_mounts round-trips and rejects relative paths', () => {
 
     const bad = { ...config, hosts: [{ ...config.hosts[0], netMounts: ['share'] }] };
     writeFileSync(path, serializeConfig(bad), 'utf8');
-    assert.throws(() => loadConfig(path), /net_mounts path must be absolute/);
+    assert.throws(() => loadConfig(path), /必须是绝对路径/);
   } finally {
     rmSync(path, { force: true });
   }
@@ -980,7 +980,7 @@ test('an invalid announcement level is rejected rather than silently defaulted',
       }),
       'utf8',
     );
-    assert.throws(() => loadConfig(path), /announcement\.level must be/);
+    assert.throws(() => loadConfig(path), /只能是 info、warning 或 error/);
   } finally {
     rmSync(path, { force: true });
   }

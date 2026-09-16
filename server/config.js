@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { parse, printParseErrorCode } from 'jsonc-parser';
+import { RawConfigSchema, formatConfigIssues } from './config-schema.ts';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
@@ -58,10 +59,6 @@ export function parseJsonc(text) {
     );
   }
   return value;
-}
-
-function fail(msg) {
-  throw new Error(`Configuration error: ${msg}`);
 }
 
 /**
@@ -116,13 +113,15 @@ export function resolveHostLabel(host, hostname, naming) {
   return deriveHostLabel(hostname, naming) ?? host.id;
 }
 
-function intOr(value, fallback, { min = 0, name } = {}) {
-  if (value === undefined || value === null || value === '') return fallback;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < min) {
-    fail(`${name ?? 'value'} must be a number >= ${min}, got ${JSON.stringify(value)}`);
-  }
-  return Math.trunc(n);
+/**
+ * Apply a default for an absent numeric setting.
+ *
+ * This used to validate as well (finite, above a floor, truncated). That is now
+ * RawConfigSchema's job, and doing it twice meant two sets of error messages
+ * that could disagree -- so this is only the default.
+ */
+function withDefault(value, fallback) {
+  return value === undefined || value === null ? fallback : value;
 }
 
 /** Resolve a config-relative path against the project root. */
@@ -303,12 +302,27 @@ export function loadConfig(configPath) {
     throw new Error(`Cannot read config file ${path}: ${err.message}`);
   }
 
-  let parsed;
+  let document;
   try {
-    parsed = parseJsonc(raw);
+    document = parseJsonc(raw);
   } catch (err) {
     throw new Error(`Cannot parse ${path} as JSONC: ${err.message}`);
   }
+
+  // Validate the whole file at once and report EVERY problem, rather than
+  // throwing on the first one. Fixing a config used to take one restart per
+  // mistake; now the list is complete on the first run.
+  //
+  // The document is validated as written -- no defaults, no renaming -- because
+  // `raw` is kept below so an admin-page save can re-emit sections it does not
+  // edit without substituting resolved values.
+  const checked = RawConfigSchema.safeParse(document);
+  if (!checked.success) {
+    throw new Error(
+      `Configuration error in ${path}:\n${formatConfigIssues(checked.error.issues)}`,
+    );
+  }
+  const parsed = checked.data;
 
   const server = parsed.server ?? {};
   const poll = parsed.poll ?? {};
@@ -330,16 +344,14 @@ export function loadConfig(configPath) {
   //
   // Optional, and disabled unless explicitly turned on: an announcement that
   // silently appears from a config default is worse than none.
+  // Shape and level were validated by RawConfigSchema; this only decides whether
+  // there is anything worth showing.
   let announcement = null;
-  if (parsed.announcement !== undefined && parsed.announcement !== null) {
+  if (parsed.announcement) {
     const a = parsed.announcement;
-    if (typeof a !== 'object' || Array.isArray(a)) fail('announcement must be an object');
-    const level = a.level === undefined ? 'info' : String(a.level);
-    if (!['info', 'warning', 'error'].includes(level)) {
-      fail(`announcement.level must be info, warning or error (got "${level}")`);
-    }
-    const body = a.body === undefined || a.body === null ? '' : String(a.body);
-    const title = a.title === undefined || a.title === null ? '' : String(a.title);
+    const level = a.level ?? 'info';
+    const body = a.body ?? '';
+    const title = a.title ?? '';
     if (a.enabled !== false && (body.trim() || title.trim())) {
       announcement = { level, title, body };
     }
@@ -351,45 +363,22 @@ export function loadConfig(configPath) {
   // "NVIDIA RTX 5880 Ada Generation"), which does not fit a table column. The
   // map is applied on the SERVER so every consumer -- UI, API, exports -- shows
   // the same name. Anything unmapped falls back to a cleaned-up short form.
-  let gpuNames = {};
-  if (parsed.gpu_names !== undefined && parsed.gpu_names !== null) {
-    if (typeof parsed.gpu_names !== 'object' || Array.isArray(parsed.gpu_names)) {
-      fail('gpu_names must be an object mapping nvidia-smi names to display names');
-    }
-    for (const [raw, shown] of Object.entries(parsed.gpu_names)) {
-      gpuNames[String(raw)] = String(shown);
-    }
+  const gpuNames = {};
+  for (const [raw, shown] of Object.entries(parsed.gpu_names ?? {})) {
+    gpuNames[raw] = shown;
   }
 
-  let diskExclude = ['/', '/boot/efi'];
-  if (parsed.disk_exclude !== undefined && parsed.disk_exclude !== null) {
-    if (!Array.isArray(parsed.disk_exclude)) {
-      fail('disk_exclude must be an array of mount points');
-    }
-    diskExclude = parsed.disk_exclude.map((d) => String(d).trim()).filter(Boolean);
-  }
+  const diskExclude = (parsed.disk_exclude ?? ['/', '/boot/efi'])
+    .map((d) => d.trim())
+    .filter(Boolean);
 
-  if (!Array.isArray(parsed.hosts) || parsed.hosts.length === 0) {
-    fail(`${path}: "hosts" must be a non-empty array`);
-  }
-
-  const seen = new Set();
-  const hosts = parsed.hosts.map((h, i) => {
-    if (!h || typeof h !== 'object') fail(`hosts[${i}] must be an object`);
-
-    const id = String(h.id ?? '').trim();
-    const target = String(h.ssh ?? '').trim();
-    if (!id) fail(`hosts[${i}] is missing "id"`);
-    if (!target) fail(`host "${id}" is missing "ssh"`);
-    if (!/^[A-Za-z0-9._@-]+$/.test(id)) {
-      fail(`host id "${id}" may only contain letters, digits, dot, dash, underscore`);
-    }
-    if (seen.has(id)) fail(`duplicate host id "${id}"`);
-    seen.add(id);
-
-    const expectGpus = h.expect_gpus === undefined || h.expect_gpus === null
-      ? null
-      : intOr(h.expect_gpus, null, { min: 0, name: `host "${id}" expect_gpus` });
+  // Everything below is normalisation, not validation: RawConfigSchema has
+  // already guaranteed the ids exist, are unique and well-formed, and that the
+  // path lists are arrays of absolute paths without newlines.
+  const hosts = parsed.hosts.map((h) => {
+    const id = h.id;
+    const target = h.ssh;
+    const expectGpus = h.expect_gpus ?? null;
 
     // Directories whose free space matters on THIS machine.
     //
@@ -402,15 +391,7 @@ export function loadConfig(configPath) {
     // page can offer them as checkboxes; this list only selects among them.
     // A path that is not a mount point (e.g. /data living on the / volume) is
     // still probed, which is how subdirectories can be tracked separately.
-    let disks = null;
-    if (h.disks !== undefined && h.disks !== null) {
-      if (!Array.isArray(h.disks)) fail(`host "${id}" disks must be an array of paths`);
-      disks = h.disks.map((d) => String(d).trim()).filter(Boolean);
-      for (const d of disks) {
-        if (!d.startsWith('/')) fail(`host "${id}" disk path must be absolute: "${d}"`);
-        if (d.includes('\n')) fail(`host "${id}" disk path may not contain a newline`);
-      }
-    }
+    const disks = h.disks == null ? null : h.disks.map((d) => d.trim()).filter(Boolean);
 
     // Network mounts to health-check on this machine (NFS/CIFS/...).
     //
@@ -419,36 +400,28 @@ export function loadConfig(configPath) {
     // Listing them here is what makes "this machine failed to mount /share"
     // detectable -- discovery alone is silent about a mount that is absent.
     // Auto-discovered network mounts are always checked as well.
-    let netMounts = [];
-    if (h.net_mounts !== undefined && h.net_mounts !== null) {
-      if (!Array.isArray(h.net_mounts)) fail(`host "${id}" net_mounts must be an array of paths`);
-      netMounts = h.net_mounts.map((d) => String(d).trim()).filter(Boolean);
-      for (const d of netMounts) {
-        if (!d.startsWith('/')) fail(`host "${id}" net_mounts path must be absolute: "${d}"`);
-        if (d.includes('\n')) fail(`host "${id}" net_mounts path may not contain a newline`);
-      }
-    }
+    const netMounts = (h.net_mounts ?? []).map((d) => d.trim()).filter(Boolean);
 
     return {
       id,
       // null means "name this machine after the hostname it reports", which
       // keeps new machines zero-config. An explicit label always wins.
-      label: h.label ? String(h.label) : null,
+      label: h.label || null,
       ssh: target,
-      group: h.group ? String(h.group) : null,
+      group: h.group || null,
       expectGpus,
       disks,
       netMounts,
-      note: h.note ? String(h.note) : null,
+      note: h.note || null,
     };
   });
 
   // Note: interval/timeout are intentionally unclamped at the low end beyond a
   // sane floor, since a too-fast interval would open a new SSH session per host
   // faster than the remote can answer.
-  const intervalMs = intOr(poll.interval_ms, 5000, { min: 500, name: 'poll.interval_ms' });
-  const timeoutMs = intOr(poll.timeout_ms, 9000, { min: 1000, name: 'poll.timeout_ms' });
-  const staleAfterMs = intOr(poll.stale_after_ms, Math.max(intervalMs * 3, 15000), {
+  const intervalMs = withDefault(poll.interval_ms, 5000);
+  const timeoutMs = withDefault(poll.timeout_ms, 9000);
+  const staleAfterMs = withDefault(poll.stale_after_ms, Math.max(intervalMs * 3, 15000), {
     min: 1000,
     name: 'poll.stale_after_ms',
   });
@@ -465,7 +438,7 @@ export function loadConfig(configPath) {
     // does not edit without substituting resolved (absolute) values.
     raw: parsed,
     server: {
-      port: intOr(server.port, 8787, { min: 1, name: 'server.port' }),
+      port: withDefault(server.port, 8787),
       bind: server.bind ? String(server.bind) : '0.0.0.0',
       webDist: resolvePath(server.web_dist, 'web/dist'),
     },
@@ -473,29 +446,17 @@ export function loadConfig(configPath) {
       intervalMs,
       timeoutMs,
       staleAfterMs,
-      downAfterFailures: intOr(poll.down_after_failures, 3, {
-        min: 1,
-        name: 'poll.down_after_failures',
-      }),
+      downAfterFailures: withDefault(poll.down_after_failures, 3),
     },
     ssh: {
       user: ssh.user ? String(ssh.user).trim() : '',
-      controlPersistS: intOr(ssh.control_persist_s, 60, {
-        min: 0,
-        name: 'ssh.control_persist_s',
-      }),
-      connectTimeoutS: intOr(ssh.connect_timeout_s, 6, {
-        min: 1,
-        name: 'ssh.connect_timeout_s',
-      }),
+      controlPersistS: withDefault(ssh.control_persist_s, 60),
+      connectTimeoutS: withDefault(ssh.connect_timeout_s, 6),
       extraOptions: Array.isArray(ssh.extra_options) ? ssh.extra_options.map(String) : [],
     },
     db: {
       path: resolvePath(db.path, 'data/gpustatus.db'),
-      rawRetentionHours: intOr(db.raw_retention_hours, 168, {
-        min: 0,
-        name: 'db.raw_retention_hours',
-      }),
+      rawRetentionHours: withDefault(db.raw_retention_hours, 168),
     },
     naming: {
       stripDomain: naming.strip_domain !== false,
@@ -509,7 +470,7 @@ export function loadConfig(configPath) {
       // preferred so the file does not contain the secret itself.
       password: admin.password ? String(admin.password) : null,
       passwordSha256: admin.password_sha256 ? String(admin.password_sha256).toLowerCase() : null,
-      sessionHours: intOr(admin.session_hours, 12, { min: 1, name: 'admin.session_hours' }),
+      sessionHours: withDefault(admin.session_hours, 12),
     },
     hosts,
   };

@@ -886,7 +886,29 @@ crashpad 参数不匹配报 `chrome_crashpad_handler: --database is required` �
 
 ---
 
-## 17. 接口约定(`shared/schema.ts`)
+## 17. 校验都走 zod
+
+项目里现在**只有一套校验方式**:zod。两处使用:
+
+### 配置文件:`server/config-schema.ts`
+
+`config/hosts.json` 的结构由 schema 定义。相比原来的手写校验(18 处 `fail()`):
+
+- **一次报出全部问题**,而不是遇到第一个就抛。原来改一个配置文件要重启多少次才能改完;
+  现在第一次运行就给完整清单
+- **每条错误带 JSON 路径** —— `hosts[1].disks[0]: 必须是绝对路径(以 / 开头)`,
+  100 行的配置文件不用靠眼睛找
+- 消息统一中文(包括 zod 自己的兜底消息)
+
+语义规则(磁盘路径必须是绝对路径、host id 不能重复、`disks` 缺失与 `[]` 是两回事等)用
+`.refine()` / `.superRefine()` 表达,行为与原来一致。
+
+> schema 只做**校验**,不做默认值和改名 —— `raw` 保留文档原样,管理页保存时才能
+> 原样回写它没有编辑的段落。归一化仍在 `loadConfig` 里。
+
+### 接口:`shared/schema.ts`
+
+## 18. 接口约定(`shared/schema.ts`)
 
 接口的字段定义**只有一处**:`shared/schema.ts` 里的 zod schema。它同时产出三样东西:
 
@@ -911,7 +933,7 @@ crashpad 参数不匹配报 `chrome_crashpad_handler: --database is required` �
 
 ---
 
-## 18. 测试
+## 19. 测试
 
 ```bash
 npm test                          # 全部单元测试(后端 + 前端主题不变量)
