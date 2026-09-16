@@ -67,27 +67,27 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
       // Index and model are separate columns: cramming the model under the
       // number shrank it to muted 11px footnote text, which is the opposite of
       // what you look at the table for.
-      // The PCI slot, NOT the GPU index.
+      title: '#',
+      dataIndex: 'index',
+      width: 58,
+      // The GPU index, because that is the number people recognise -- it is
+      // what `nvidia-smi` prints when you ssh in, and what `nvidia-smi -i N`
+      // takes. A physical-slot label was tried here and removed: it is plumbing,
+      // not something a user of the dashboard should have to decode.
       //
-      // The index is positional: on this cluster cards are deliberately masked
-      // off, and nvidia-smi renumbers whatever remains, so "#3" today and "#3"
-      // next week can be different physical cards. The slot never moves, so it
-      // is the only label that identifies a card across time -- and it is what
-      // you would use to find the card in the chassis.
+      // Stability lives in the DATA instead. `bus_id` (the PCI slot) is
+      // collected and stored alongside the index on every sample, so anything
+      // that has to survive a masking change -- cards are masked off after boot
+      // and nvidia-smi renumbers the rest -- keys on the slot rather than on
+      // this positional number. Nothing in the UI needs to show it for that to
+      // hold.
       //
-      // The index stays in the tooltip, because it is what `nvidia-smi -i N`
-      // takes once you have ssh'd in.
-      title: 'PCIe 槽位',
-      dataIndex: 'bus_id',
-      width: 92,
-      render: (bus: string | null, gpu: Gpu) => (
-        <Typography.Text
-          strong
-          className="cell-bus"
-          style={{ fontSize: 12 }}
-          title={bus ? `nvidia-smi -i ${gpu.index}  (序号会随屏蔽变化,槽位不会)` : undefined}
-        >
-          {bus ?? `#${gpu.index}`}
+      // Bare numeral: the column header already says this is the index, so a
+      // '#' on every row is decoration. The class is a stable hook for the
+      // render check, which cannot string-match a bare digit safely.
+      render: (index: number) => (
+        <Typography.Text strong className="cell-index">
+          {index}
         </Typography.Text>
       ),
     },
