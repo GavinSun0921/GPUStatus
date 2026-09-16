@@ -359,6 +359,35 @@ export const AdminConfigSchema = z.object({
   hosts: z.array(EditableHostSchema),
 });
 
+/**
+ * One point of a machine's hourly trend.
+ *
+ * Every field is nullable: a metric the probe could not read, or an hour that
+ * predates the column being added, is genuinely absent -- and absent must draw
+ * as a gap rather than as zero.
+ */
+export const HistoryPointSchema = z.object({
+  bucket: z.number(),
+  gpu_util: num,
+  gpu_mem_pct: num,
+  temp_c: num,
+  power_w: num,
+  cpu_pct: num,
+  sysmem_pct: num,
+  /** memory-BANDWIDTH utilisation, not to be confused with gpu_mem_pct */
+  gpu_bw_pct: num,
+  /** cards throttled for a performance-costing reason; excludes power capping */
+  throttled_cards: num,
+  n_gpus: num,
+});
+
+export const MachineHistorySchema = z.object({
+  host: z.string(),
+  from: z.number(),
+  to: z.number(),
+  points: z.array(HistoryPointSchema),
+});
+
 // --- inferred types ---------------------------------------------------------
 // The frontend uses these instead of re-declaring the shapes by hand.
 
@@ -378,5 +407,7 @@ export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type UsageRow = z.infer<typeof UsageRowSchema>;
 export type UsageTotalsRow = z.infer<typeof UsageTotalsRowSchema>;
 export type EventRow = z.infer<typeof EventRowSchema>;
+export type HistoryPoint = z.infer<typeof HistoryPointSchema>;
+export type MachineHistory = z.infer<typeof MachineHistorySchema>;
 export type EditableHost = z.infer<typeof EditableHostSchema>;
 export type AdminConfig = z.infer<typeof AdminConfigSchema>;

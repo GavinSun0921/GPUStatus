@@ -45,6 +45,23 @@ function n(v) {
   return Number.isFinite(x) ? x : null;
 }
 
+/**
+ * Throttle-reason bits that actually cost performance.
+ *
+ * 0x008 HwSlowdown | 0x020 SwThermalSlowdown | 0x040 HwThermalSlowdown |
+ * 0x080 HwPowerBrakeSlowdown.
+ *
+ * Power cap (0x004) is deliberately NOT included: at full load it is the card
+ * behaving as configured, and counting it would make every busy hour look like
+ * an incident. Must match the rule in `throttleWarnings` (server/state.js).
+ *
+ * Written as the OR of the named bits rather than as a decimal literal: the
+ * first version of this hard-coded 236 where the bits sum to 232, and 236 has
+ * the power-cap bit set -- which put "8 of 8 cards throttled" on a machine that
+ * was merely power-capped.
+ */
+const THROTTLE_BAD_BITS = 0x008 | 0x020 | 0x040 | 0x080;
+
 function s(v) {
   if (v === null || v === undefined) return null;
   return String(v);
@@ -143,6 +160,16 @@ export class Db {
    */
   #addColumns() {
     const additions = [
+      // Second wave of hourly metrics; the column list is duplicated from the
+      // CREATE TABLE so an existing database gains them too.
+      ['host_hourly', 'cpu_sum', 'REAL NOT NULL DEFAULT 0'],
+      ['host_hourly', 'cpu_n', 'INTEGER NOT NULL DEFAULT 0'],
+      ['host_hourly', 'sysmem_sum', 'REAL NOT NULL DEFAULT 0'],
+      ['host_hourly', 'sysmem_n', 'INTEGER NOT NULL DEFAULT 0'],
+      ['host_hourly', 'memutil_sum', 'REAL NOT NULL DEFAULT 0'],
+      ['host_hourly', 'memutil_n', 'INTEGER NOT NULL DEFAULT 0'],
+      ['host_hourly', 'throttle_sum', 'REAL NOT NULL DEFAULT 0'],
+      ['host_hourly', 'throttle_n', 'INTEGER NOT NULL DEFAULT 0'],
       ['gpu_sample', 'throttle_mask', 'INTEGER'],
       ['gpu_sample', 'sm_clock_mhz', 'REAL'],
       ['gpu_sample', 'sm_clock_max_mhz', 'REAL'],
@@ -169,7 +196,12 @@ export class Db {
    */
   #backfillHostHourly() {
     const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM host_hourly').get();
-    if (c > 0) return;
+    if (c > 0) {
+      // The table already exists, but it may predate the second wave of
+      // metrics. Fill only those, so switching metric on old data is not blank.
+      this.#backfillHourlyExtras();
+      return;
+    }
 
     const available = this.db
       .prepare('SELECT COUNT(*) AS c FROM gpu_sample WHERE util_pct IS NOT NULL')
@@ -206,6 +238,68 @@ export class Db {
 
     const { c: rows } = this.db.prepare('SELECT COUNT(*) AS c FROM host_hourly').get();
     this.backfilledHours = rows;
+  }
+
+  /**
+   * Fill the second-wave hourly metrics on rows that predate them.
+   *
+   * `cpu` and `sysmem` come from host_sample, `memutil` and `throttle` from
+   * gpu_sample -- the same two sources the live writer reads. Guarded on
+   * cpu_n = 0 rather than a schema version, so it is idempotent and re-runs if
+   * the columns are ever cleared.
+   */
+  #backfillHourlyExtras() {
+    const { c } = this.db
+      .prepare('SELECT COUNT(*) AS c FROM host_hourly WHERE cpu_n = 0')
+      .get();
+    if (c === 0) return;
+
+    this.db.exec('PRAGMA temp_store = MEMORY');
+
+    // Host metrics: one row per host per tick.
+    this.db.exec(`
+      UPDATE host_hourly
+         SET cpu_sum    = COALESCE((SELECT SUM(h.cpu_pct) FROM host_sample h
+                                     WHERE h.host_id = host_hourly.host_id
+                                       AND CAST(h.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                       AND h.cpu_pct IS NOT NULL), 0),
+             cpu_n      = COALESCE((SELECT COUNT(h.cpu_pct) FROM host_sample h
+                                     WHERE h.host_id = host_hourly.host_id
+                                       AND CAST(h.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                       AND h.cpu_pct IS NOT NULL), 0),
+             sysmem_sum = COALESCE((SELECT SUM(h.mem_pct) FROM host_sample h
+                                     WHERE h.host_id = host_hourly.host_id
+                                       AND CAST(h.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                       AND h.mem_pct IS NOT NULL), 0),
+             sysmem_n   = COALESCE((SELECT COUNT(h.mem_pct) FROM host_sample h
+                                     WHERE h.host_id = host_hourly.host_id
+                                       AND CAST(h.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                       AND h.mem_pct IS NOT NULL), 0)
+       WHERE cpu_n = 0
+    `);
+
+    // GPU metrics: several rows per host per tick, so aggregate directly.
+    this.db.exec(`
+      UPDATE host_hourly
+         SET memutil_sum = COALESCE((SELECT SUM(g.mem_util_pct) FROM gpu_sample g
+                                      WHERE g.host_id = host_hourly.host_id
+                                        AND CAST(g.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                        AND g.mem_util_pct IS NOT NULL), 0),
+             memutil_n   = COALESCE((SELECT COUNT(g.mem_util_pct) FROM gpu_sample g
+                                      WHERE g.host_id = host_hourly.host_id
+                                        AND CAST(g.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                        AND g.mem_util_pct IS NOT NULL), 0),
+             throttle_sum = COALESCE((SELECT COUNT(*) FROM gpu_sample g
+                                       WHERE g.host_id = host_hourly.host_id
+                                         AND CAST(g.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                         AND g.throttle_mask IS NOT NULL
+                                         AND (g.throttle_mask & ${THROTTLE_BAD_BITS}) <> 0), 0),
+             throttle_n  = COALESCE((SELECT COUNT(DISTINCT g.ts) FROM gpu_sample g
+                                      WHERE g.host_id = host_hourly.host_id
+                                        AND CAST(g.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} = host_hourly.bucket_ts
+                                        AND g.throttle_mask IS NOT NULL), 0)
+       WHERE throttle_n = 0
+    `);
   }
 
   /**
@@ -343,6 +437,23 @@ export class Db {
         power_sum  REAL    NOT NULL DEFAULT 0,
         power_n    INTEGER NOT NULL DEFAULT 0,
         n_gpus     INTEGER,
+        -- Second wave of metrics, all computed from data already in hand at
+        -- write time: the host sample carries cpu/memory, the GPU samples carry
+        -- bandwidth and throttle state.
+        cpu_sum      REAL    NOT NULL DEFAULT 0,
+        cpu_n        INTEGER NOT NULL DEFAULT 0,
+        sysmem_sum   REAL    NOT NULL DEFAULT 0,
+        sysmem_n     INTEGER NOT NULL DEFAULT 0,
+        -- memory-BANDWIDTH utilisation, which is not the same as mem_sum above
+        -- (how full the memory is)
+        memutil_sum  REAL    NOT NULL DEFAULT 0,
+        memutil_n    INTEGER NOT NULL DEFAULT 0,
+        -- average number of cards throttled for a reason that costs
+        -- performance. Power capping is excluded: at full load it is the card
+        -- behaving as configured, and plotting it would make every busy hour
+        -- look like an incident.
+        throttle_sum REAL    NOT NULL DEFAULT 0,
+        throttle_n   INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (bucket_ts, host_id)
       );
 
@@ -412,17 +523,27 @@ export class Db {
 
       upsertHostHourly: this.db.prepare(`
         INSERT INTO host_hourly (bucket_ts, host_id, util_sum, util_n, mem_sum, mem_n,
-          temp_max_c, power_sum, power_n, n_gpus)
-        VALUES (?,?,?,1,?,1,?,?,1,?)
+          temp_max_c, power_sum, power_n, n_gpus,
+          cpu_sum, cpu_n, sysmem_sum, sysmem_n, memutil_sum, memutil_n,
+          throttle_sum, throttle_n)
+        VALUES (?,?,?,1,?,1,?,?,1,?,?,1,?,1,?,1,?,1)
         ON CONFLICT(bucket_ts, host_id) DO UPDATE SET
-          util_sum   = util_sum + excluded.util_sum,
-          util_n     = util_n + 1,
-          mem_sum    = mem_sum + excluded.mem_sum,
-          mem_n      = mem_n + 1,
-          temp_max_c = MAX(COALESCE(temp_max_c, excluded.temp_max_c), excluded.temp_max_c),
-          power_sum  = power_sum + excluded.power_sum,
-          power_n    = power_n + 1,
-          n_gpus     = MAX(COALESCE(n_gpus, 0), excluded.n_gpus)`),
+          util_sum     = util_sum + excluded.util_sum,
+          util_n       = util_n + 1,
+          mem_sum      = mem_sum + excluded.mem_sum,
+          mem_n        = mem_n + 1,
+          temp_max_c   = MAX(COALESCE(temp_max_c, excluded.temp_max_c), excluded.temp_max_c),
+          power_sum    = power_sum + excluded.power_sum,
+          power_n      = power_n + 1,
+          n_gpus       = MAX(COALESCE(n_gpus, 0), excluded.n_gpus),
+          cpu_sum      = cpu_sum + excluded.cpu_sum,
+          cpu_n        = cpu_n + 1,
+          sysmem_sum   = sysmem_sum + excluded.sysmem_sum,
+          sysmem_n     = sysmem_n + 1,
+          memutil_sum  = memutil_sum + excluded.memutil_sum,
+          memutil_n    = memutil_n + 1,
+          throttle_sum = throttle_sum + excluded.throttle_sum,
+          throttle_n   = throttle_n + 1`),
 
       upsertRollup: this.db.prepare(`
         INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
@@ -534,14 +655,32 @@ export class Db {
           .map((g) => (g.memUsedMib / g.memTotalMib) * 100);
         const temps = gpus.map((g) => g.tempC).filter((v) => typeof v === 'number');
         const power = gpus.map((g) => g.powerW).filter((v) => typeof v === 'number');
+        // Averaging helpers: a metric the card does not report must contribute
+        // neither to the sum nor to the count, so the running average stays
+        // exact instead of being dragged toward zero.
+        const avg = (values) =>
+          values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+        const bandwidth = gpus
+          .map((g) => g.memUtil)
+          .filter((v) => typeof v === 'number');
+        // Uses the module-level THROTTLE_BAD_BITS, so the live writer and the
+        // backfill cannot disagree about what counts as throttled.
+        const throttledCards = gpus.filter(
+          (g) => typeof g.throttleMask === 'number' && (g.throttleMask & THROTTLE_BAD_BITS) !== 0,
+        ).length;
+
         if (util.length > 0) {
           this.stmt.upsertHostHourly.run(
             Math.floor(ts / HOUR_MS) * HOUR_MS, hostId,
             util.reduce((a, b) => a + b, 0) / util.length,
-            mem.length ? mem.reduce((a, b) => a + b, 0) / mem.length : null,
+            avg(mem),
             temps.length ? Math.max(...temps) : null,
             power.reduce((a, b) => a + b, 0),
             gpus.length,
+            host.cpuPct ?? null,
+            host.memPct ?? null,
+            avg(bandwidth),
+            throttledCards,
           );
         }
       }
@@ -667,10 +806,14 @@ export class Db {
     return this.db
       .prepare(`
         SELECT bucket_ts AS bucket,
-               CASE WHEN util_n  > 0 THEN util_sum  / util_n  END AS gpu_util,
-               CASE WHEN mem_n   > 0 THEN mem_sum   / mem_n   END AS gpu_mem_pct,
+               CASE WHEN util_n     > 0 THEN util_sum     / util_n     END AS gpu_util,
+               CASE WHEN mem_n      > 0 THEN mem_sum      / mem_n      END AS gpu_mem_pct,
                temp_max_c AS temp_c,
-               CASE WHEN power_n > 0 THEN power_sum / power_n END AS power_w,
+               CASE WHEN power_n    > 0 THEN power_sum    / power_n    END AS power_w,
+               CASE WHEN cpu_n      > 0 THEN cpu_sum      / cpu_n      END AS cpu_pct,
+               CASE WHEN sysmem_n   > 0 THEN sysmem_sum   / sysmem_n   END AS sysmem_pct,
+               CASE WHEN memutil_n  > 0 THEN memutil_sum  / memutil_n  END AS gpu_bw_pct,
+               CASE WHEN throttle_n > 0 THEN throttle_sum / throttle_n END AS throttled_cards,
                n_gpus
         FROM host_hourly
         WHERE host_id = ? AND bucket_ts >= ? AND bucket_ts < ?

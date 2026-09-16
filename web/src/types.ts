@@ -13,6 +13,8 @@
 
 export type {
   EditableHost,
+  HistoryPoint,
+  MachineHistory,
   AdminConfig,
   GpuProc,
   Gpu,
