@@ -256,18 +256,27 @@ export class State {
   applyConfig(next) {
     this.config = next;
 
-    const wanted = new Set(next.hosts.map((h) => h.id));
-    for (const id of [...this.hosts.keys()]) {
-      if (!wanted.has(id)) this.hosts.delete(id);
-    }
+    // Rebuild in CONFIG order rather than editing the existing map in place.
+    //
+    // A Map preserves insertion order, so the previous version -- which deleted
+    // removed hosts and appended new ones -- put a host added by a hot reload at
+    // the END of the dashboard even when the config lists it first. The order
+    // then changed again on the next restart, which silently reorders the page
+    // for no reason a reader could see.
+    //
+    // Existing entries are reused by reference, so live state (last sample,
+    // failure counters, thermal window) survives the rebuild untouched.
+    const previous = this.hosts;
+    const rebuilt = new Map();
 
     for (const host of next.hosts) {
-      const existing = this.hosts.get(host.id);
+      const existing = previous.get(host.id);
       if (existing) {
         existing.host = host;
+        rebuilt.set(host.id, existing);
         continue;
       }
-      this.hosts.set(host.id, {
+      rebuilt.set(host.id, {
         host,
         latest: null,
         status: STATUS.UNKNOWN,
@@ -282,6 +291,8 @@ export class State {
         totalFailures: 0,
       });
     }
+
+    this.hosts = rebuilt;
   }
 
   /** Subscribe to snapshot updates (SSE clients). */

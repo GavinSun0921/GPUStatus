@@ -1267,3 +1267,36 @@ test('a save from a stale admin page cannot silently drop another writer\'s edit
   // Saving with the CURRENT revision is still allowed.
   assert.equal(revision(file) === revision(file), true);
 });
+
+test('a host added by hot reload appears where the config puts it, not last', () => {
+  // A Map preserves insertion order, and applyConfig used to append new hosts.
+  // So gpu03 -- listed FIRST in the config -- showed up LAST on the dashboard
+  // because it arrived via a hot reload rather than at startup. Restarting the
+  // service then silently reordered the page.
+  const cfg = (ids) => ({
+    site: null,
+    poll: { intervalMs: 15000, timeoutMs: 12000, staleAfterMs: 45000, downAfterFailures: 10 },
+    naming: { stripDomain: true },
+    hosts: ids.map((id) => ({ id, ssh: id, expectGpus: null, disks: null, netMounts: [] })),
+  });
+
+  const state = new State(cfg(['gpu05', 'gpu06']));
+  const order = () => state.buildSnapshot().hosts.map((h) => h.id);
+
+  assert.deepEqual(order(), ['gpu05', 'gpu06']);
+
+  // gpu03 is inserted at the front, as the config lists it.
+  state.applyConfig(cfg(['gpu03', 'gpu05', 'gpu06']));
+  assert.deepEqual(order(), ['gpu03', 'gpu05', 'gpu06'], 'the added host was appended instead of placed');
+
+  // Reordering the config reorders the page, and removing one drops it.
+  state.applyConfig(cfg(['gpu05', 'gpu03']));
+  assert.deepEqual(order(), ['gpu05', 'gpu03']);
+
+  // Live state must survive the rebuild: the entry is reused, not recreated.
+  const before = state.hosts.get('gpu05');
+  before.totalPolls = 42;
+  state.applyConfig(cfg(['gpu05', 'gpu03']));
+  assert.equal(state.hosts.get('gpu05'), before, 'the host entry was replaced');
+  assert.equal(state.hosts.get('gpu05').totalPolls, 42, 'live state was lost on reload');
+});
