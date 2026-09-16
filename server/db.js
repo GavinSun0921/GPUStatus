@@ -894,7 +894,14 @@ export class Db {
                CASE WHEN cpu_n      > 0 THEN cpu_sum      / cpu_n      END AS cpu_pct,
                CASE WHEN sysmem_n   > 0 THEN sysmem_sum   / sysmem_n   END AS sysmem_pct,
                CASE WHEN memutil_n  > 0 THEN memutil_sum  / memutil_n  END AS gpu_bw_pct,
-               CASE WHEN throttle_n > 0 THEN throttle_sum / throttle_n END AS throttled_cards,
+               -- Fraction of CARD-TIME spent throttled, not "average cards
+               -- throttled": that reads as "0.137 张", and a third of a card is
+               -- not a thing anyone can picture. Over the hour there are
+               -- throttle_n samples of n_gpus cards each, so the share is
+               -- throttled card-instants over total card-instants. Same data,
+               -- expressed in a unit that means something.
+               CASE WHEN throttle_n > 0 AND n_gpus > 0
+                    THEN throttle_sum * 100.0 / (throttle_n * n_gpus) END AS throttle_pct,
                n_gpus
         FROM host_hourly
         WHERE host_id = ? AND bucket_ts >= ? AND bucket_ts < ?

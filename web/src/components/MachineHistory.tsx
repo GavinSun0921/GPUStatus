@@ -41,7 +41,7 @@ type MetricKey =
   | 'sysmem_pct'
   | 'temp_c'
   | 'power_w'
-  | 'throttled_cards';
+  | 'throttle_pct';
 
 /**
  * What can be plotted, and how to present it.
@@ -117,12 +117,16 @@ const METRICS: MetricSpec[] = [
     hint: '所有卡的功耗之和',
   },
   {
-    value: 'throttled_cards',
-    label: '降频卡数',
-    unit: ' 张',
+    value: 'throttle_pct',
+    label: '显卡降频占比',
+    unit: '%',
+    // NOT pinned to 0-100 like the other percentages: throttling is rare, so a
+    // full-scale axis would flatten every real event onto the baseline. Scaling
+    // to the data is what makes the spikes visible -- which is the whole point
+    // of plotting this.
     max: undefined,
     digits: 2,
-    hint: '因热降频或硬件原因而降频的显卡数量。功耗墙不算 —— 满载撞功耗墙是正常表现',
+    hint: '该小时内,平均有百分之多少的显卡时间处于热降频(按卡时计算)。功耗墙不算 —— 满载撞功耗墙是正常表现',
   },
 ];
 

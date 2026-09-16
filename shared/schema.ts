@@ -385,8 +385,15 @@ export const HistoryPointSchema = z.object({
   sysmem_pct: num,
   /** memory-BANDWIDTH utilisation, not to be confused with gpu_mem_pct */
   gpu_bw_pct: num,
-  /** cards throttled for a performance-costing reason; excludes power capping */
-  throttled_cards: num,
+  /**
+   * Share of CARD-TIME spent throttled for a performance-costing reason.
+   *
+   * Percentage, not a card count: the underlying figure is an average over the
+   * hour, and "0.137 cards throttled" is not a quantity anyone can picture.
+   * Power capping is excluded -- at full load it is the card behaving as
+   * configured.
+   */
+  throttle_pct: num,
   n_gpus: num,
 });
 
