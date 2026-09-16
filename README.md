@@ -886,7 +886,32 @@ crashpad 参数不匹配报 `chrome_crashpad_handler: --database is required` �
 
 ---
 
-## 17. 测试
+## 17. 接口约定(`shared/schema.ts`)
+
+接口的字段定义**只有一处**:`shared/schema.ts` 里的 zod schema。它同时产出三样东西:
+
+1. **前端类型** —— `web/src/types.ts` 现在是 `z.infer` 的转发,不再是 245 行手写 interface
+2. **运行时校验** —— 前端每次收到 SSE 推送都过一遍 schema,字段改名或大小写写错会**立刻报错**,
+   而不是静默读成 `undefined`
+3. **管理页校验** —— 管理页加载配置时同样校验
+
+**为什么值得**:同一个形状原本有**四份手工维护的副本**,而且已经漂移过:
+
+| 副本 | 问题 |
+|---|---|
+| `web/src/types.ts` | 245 行 interface |
+| `render-check.tsx` 的 `CONTRACT` 表 | ~60 个字段名,**`note` 写了两遍** |
+| `server/state.js` | 实际发出的东西 |
+| `AdminView.tsx` 本地 interface | 第四份 |
+
+真实事故就是这么来的:服务端发 `totalMib` 而类型声明 `total_mib`,磁盘数字渲染成 `— / —`,
+没有任何报错。另一次是 `net_mounts` 漏出管理接口,管理页直接白屏。
+
+> Node 24 可以直接 import `.ts`(类型擦除),所以前后端**共用同一个文件**,不需要构建步骤。
+
+---
+
+## 18. 测试
 
 ```bash
 npm test                          # 全部单元测试(后端 + 前端主题不变量)

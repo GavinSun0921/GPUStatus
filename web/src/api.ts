@@ -1,5 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { SnapshotSchema } from '../../shared/schema';
 import type { Snapshot } from './types';
+
+/**
+ * Parse a payload against the contract, reporting a mismatch ONCE per field.
+ *
+ * The previous code was `JSON.parse(...) as Snapshot` -- a cast, which asserts
+ * nothing. A field the server renamed (or emitted in the wrong case) simply read
+ * as `undefined` and the UI showed a blank cell with no error anywhere. That
+ * happened: the disk figures rendered as "— / —" because the server sent
+ * `totalMib` while the type declared `total_mib`.
+ *
+ * Zod turns that class of bug into a visible, specific complaint. It is
+ * deliberately loud in the console but non-fatal: a dashboard showing stale data
+ * with a warning beats a dashboard showing nothing.
+ */
+const reportedIssues = new Set<string>();
+
+function parseSnapshot(raw: unknown): Snapshot | null {
+  const result = SnapshotSchema.safeParse(raw);
+  if (result.success) return result.data;
+
+  for (const issue of result.error.issues) {
+    const where = issue.path.join('.') || '(root)';
+    const key = `${where}: ${issue.message}`;
+    if (reportedIssues.has(key)) continue;
+    reportedIssues.add(key);
+    console.error(`[gpustatus] API contract violation at ${where}: ${issue.message}`);
+  }
+  return null;
+}
 
 /**
  * Live snapshot stream.
@@ -22,12 +52,13 @@ export function useSnapshot() {
 
     const onSnapshot = (event: MessageEvent) => {
       try {
-        const data = JSON.parse(event.data) as Snapshot;
+        const data = parseSnapshot(JSON.parse(event.data));
+        if (!data) return; // reported by parseSnapshot; keep the last good view
         offsetRef.current = data.server_now - Date.now();
         setSnapshot(data);
         setConnected(true);
       } catch {
-        // A malformed frame is ignored; the next push will correct the view.
+        // A frame that is not even JSON is ignored; the next push corrects it.
       }
     };
 

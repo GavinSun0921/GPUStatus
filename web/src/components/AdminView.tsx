@@ -1,3 +1,4 @@
+import { AdminConfigSchema } from '../../../shared/schema';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
@@ -40,34 +41,17 @@ interface EditableAnnouncement {
   body: string;
 }
 
-interface EditableHost {
-  key: string;
-  id: string;
-  label: string;
-  ssh: string;
-  group: string;
-  expect_gpus: number | null;
-  /** null = never configured (everything shown); [] = nothing ticked */
-  disks: string[] | null;
-  /** network mounts expected on this machine, health-checked for presence */
-  net_mounts: string[];
-  /** per-machine notice shown on that machine's card */
-  note: string;
-}
+// `EditableHost` / `AdminConfig` used to be declared here as well -- a fourth
+// hand-maintained copy of a shape that `shared/schema.ts` now defines once.
+// `key` is a React list key that only exists in this component's state, hence
+// the intersection rather than a new interface.
+import type { EditableHost as EditableHostFields, AdminConfig as AdminConfigFields } from '../types';
 
-interface AdminConfig {
-  site: string;
+type EditableHost = EditableHostFields & { key: string };
+type AdminConfig = AdminConfigFields & {
+  /** `enabled` is derived for the toggle; the API carries only title/body. */
   announcement: EditableAnnouncement;
-  poll: {
-    interval_ms: number;
-    timeout_ms: number;
-    stale_after_ms: number;
-    down_after_failures: number;
-  };
-  naming: { strip_domain: boolean; capitalize: boolean };
-  admin: { has_password: boolean; using_sha256: boolean; session_hours: number };
-  hosts: Omit<EditableHost, 'key'>[];
-}
+};
 
 export function AdminView({ snapshot }: { snapshot: Snapshot | null }) {
   const [session, setSession] = useState<{ enabled: boolean; authenticated: boolean; hint: string | null } | null>(null);
@@ -414,14 +398,28 @@ function ConfigEditor({
         setLoadError(`加载配置失败 (HTTP ${res.status})`);
         return;
       }
-      const body = (await res.json()) as AdminConfig;
+      // Validated, not cast. This page previously dereferenced fields directly
+      // on an unchecked cast, and when one was missing from the payload the
+      // whole view threw and rendered blank -- after a successful login, so it
+      // looked like the login had failed. The defensive `?.`/`??` chain that
+      // grew here afterwards is unnecessary once the shape is checked.
+      const parsed = AdminConfigSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        const where = parsed.error.issues
+          .slice(0, 3)
+          .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+          .join('; ');
+        setLoadError(`服务端返回的管理配置不符合约定 — ${where}`);
+        return;
+      }
+      const body = parsed.data;
       setConfig({
         ...body,
         announcement: {
-          enabled: Boolean(body.announcement?.title || body.announcement?.body),
-          level: body.announcement?.level ?? 'info',
-          title: body.announcement?.title ?? '',
-          body: body.announcement?.body ?? '',
+          enabled: Boolean(body.announcement.title || body.announcement.body),
+          level: body.announcement.level,
+          title: body.announcement.title,
+          body: body.announcement.body,
         },
       });
       setHosts(body.hosts.map((h, i) => ({ ...h, key: `${h.id}-${i}` })));

@@ -9,6 +9,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // `shared/schema.ts` lives above this root and is imported by both the
+    // frontend and the backend, so the dev server must be allowed to read it.
+    fs: { allow: ['..'] },
     proxy: {
       // Where the backend listens. Change this if you run the API elsewhere;
       // proxying keeps the browser same-origin, so dev matches production.

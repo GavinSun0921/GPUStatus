@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { aggregateUserUsage } from '../db.js';
+import { AdminConfigSchema } from '../../shared/schema.ts';
 import { State, decodeThrottle, displayGpuName, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
@@ -853,16 +854,17 @@ test('the admin API returns every field the admin page reads', () => {
   const config = loadConfig();
   const view = publicAdminConfig(config);
 
-  assert.deepEqual(
-    Object.keys(view).sort(),
-    ['admin', 'announcement', 'hosts', 'naming', 'poll', 'site'].sort(),
-    'top-level admin config shape changed',
-  );
-
-  assert.deepEqual(
-    Object.keys(view.hosts[0]).sort(),
-    ['disks', 'expect_gpus', 'group', 'id', 'label', 'net_mounts', 'note', 'ssh'].sort(),
-    'per-host admin config shape changed',
+  // The field lists used to be written out here by hand, in a second copy of
+  // the shape. `shared/schema.ts` defines it once and the admin page validates
+  // against the same schema at runtime, so this asserts the live payload
+  // satisfies it rather than restating the fields.
+  const validation = AdminConfigSchema.safeParse(view);
+  assert.ok(
+    validation.success,
+    'admin config violates the contract: ' +
+      (validation.success
+        ? ''
+        : validation.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')),
   );
 
   // The password must never be part of this payload.

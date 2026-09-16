@@ -15,6 +15,7 @@
  */
 
 import { JSDOM } from 'jsdom';
+import { SnapshotSchema } from '../../shared/schema';
 import type { Gpu, Snapshot } from './types';
 
 // A real DOM, installed BEFORE React and antd are imported (hence the dynamic
@@ -282,46 +283,23 @@ check(
 // `total_mib`. These key sets mirror web/src/types.ts and are compared against
 // the live response, including nested objects.
 // ---------------------------------------------------------------------------
-const CONTRACT: Record<string, string[]> = {
-  host: [
-    'id', 'label', 'group', 'ssh', 'expect_gpus', 'note', 'status', 'status_since', 'age_ms',
-    'last_ok', 'last_attempt', 'consecutive_failures', 'last_error', 'poll_duration_ms',
-    'total_polls', 'total_failures', 'warnings', 'stale', 'hostname', 'kernel', 'driver_version',
-    'uptime_s', 'clock_skew_ms', 'nvidia_error', 'cpu', 'mem', 'disks', 'disks_configured',
-    'net_mounts', 'note', 'gpus', 'users',
-  ],
-  cpu: ['pct', 'iowait_pct', 'ncpu', 'load1', 'load5', 'load15', 'running_procs', 'total_procs'],
-  mem: ['total_mib', 'used_mib', 'avail_mib', 'pct', 'swap_total_mib', 'swap_used_mib'],
-  gpu: [
-    'index', 'uuid', 'name', 'display_name', 'util', 'mem_used_mib', 'mem_total_mib',
-    'mem_pct', 'temp_c', 'power_w', 'fan_pct', 'n_procs', 'procs',
-    'throttle_mask', 'throttle_reasons', 'throttled', 'sm_clock_mhz',
-    'sm_clock_max_mhz', 'power_limit_w', 'pstate',
-  ],
-  gpu_proc: ['pid', 'username', 'name', 'used_mem_mib', 'sm_pct'],
-  host_user: ['username', 'gpu_count', 'gpus', 'mem_mib', 'proc_count', 'sm_pct_avg', 'sm_pct_sum', 'procs'],
-  user_proc: ['pid', 'name', 'gpu_index', 'used_mem_mib', 'sm_pct'],
-  disk: ['path', 'mount', 'missing', 'selected', 'total_mib', 'used_mib', 'avail_mib', 'use_pct'],
-  net_mount: ['path', 'fstype', 'status', 'expected'],
-  global_user: ['username', 'gpu_count', 'mem_mib', 'proc_count', 'sm_pct_sum', 'sm_pct_avg', 'hosts'],
-  summary: [
-    'hosts_total', 'hosts_ok', 'hosts_stale', 'hosts_down', 'hosts_unknown', 'hosts_warning',
-    'gpus_total', 'gpus_allocated', 'gpus_mem_used_mib', 'gpus_mem_total_mib',
-    'procs_total', 'users_active',
-  ],
-  config: ['interval_ms', 'stale_after_ms', 'down_after_failures'],
-};
-
-// Top-level snapshot keys.
-check(typeof snapshot.site === 'string' || snapshot.site === null, 'snapshot.site missing');
-check(
-  snapshot.announcement === null || typeof snapshot.announcement === 'object',
-  'snapshot.announcement missing',
-);
-
+// The API contract is no longer listed field-by-field here.
+//
+// A hand-maintained table of ~60 field names per shape was one of THREE copies
+// of the same information (with `web/src/types.ts` and `server/state.js`), and
+// it had already drifted -- `note` appeared twice in `host`. It existed because
+// nothing validated the response at runtime.
+//
+// `shared/schema.ts` now defines the shape once and validates it, on every SSE
+// push, in `web/src/api.ts`. So this check asserts the thing that file cannot:
+// that a REAL snapshot from a RUNNING backend satisfies that schema.
 // The lab name identifies the whole installation, so it belongs in the page
 // header once -- not repeated as a tag on every machine card. This render covers
 // only the machine list, so the name must not appear here at all.
+//
+// (This was collateral damage when the CONTRACT table above was deleted: it sat
+// between the table and the report section, and removing a block by index range
+// took it too.)
 if (snapshot.site) {
   const repeats = countText(snapshot.site);
   check(
@@ -331,43 +309,16 @@ if (snapshot.site) {
   );
 }
 
-const first = snapshot.hosts[0];
-const samples: Record<string, unknown> = {
-  host: first,
-  cpu: first.cpu,
-  mem: first.mem,
-  gpu: first.gpus[0],
-  gpu_proc: first.gpus.find((g) => g.procs.length > 0)?.procs[0],
-  host_user: first.users[0],
-  user_proc: first.users.find((u) => u.procs.length > 0)?.procs[0],
-  disk: first.disks[0],
-  net_mount: first.net_mounts[0],
-  global_user: snapshot.users[0],
-  summary: snapshot.summary,
-  config: snapshot.config,
-};
-
-let contractChecked = 0;
-for (const [name, expected] of Object.entries(CONTRACT)) {
-  const value = samples[name];
-  if (value === undefined || value === null) {
-    // Legitimately empty on this cluster (e.g. no processes anywhere), so it is
-    // reported rather than counted as a failure.
-    console.log(`  (skipped ${name}: no sample data)`);
-    continue;
-  }
-  const actual = Object.keys(value as Record<string, unknown>).sort();
-  const want = [...expected].sort();
-  const missing = want.filter((k) => !actual.includes(k));
-  const extra = actual.filter((k) => !want.includes(k));
-  check(
-    missing.length === 0 && extra.length === 0,
-    `${name} shape drift: ${missing.length ? `missing [${missing}]` : ''}${
-      missing.length && extra.length ? ' ' : ''
-    }${extra.length ? `unexpected [${extra}]` : ''}`,
-  );
-  contractChecked += 1;
-}
+const validation = SnapshotSchema.safeParse(snapshot);
+check(
+  validation.success,
+  validation.success
+    ? ''
+    : `live snapshot violates the contract: ${validation.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ')}`,
+);
 
 // --- report -----------------------------------------------------------------
 console.log(`hosts rendered     : ${snapshot.hosts.length} (${machines} cards)`);
@@ -377,7 +328,7 @@ console.log(`disk tiles         : ${countOf('disk-tile')} (expected ${expectedDi
 console.log(`net-mount blocks   : ${countOf('net-tile')} (expected ${expectedNetMounts})`);
 console.log(`user rows          : ${countOf('user-row')} (expected ${snapshot.users.length})`);
 console.log(`users rendered     : ${snapshot.users.map((u) => u.username).join(', ')}`);
-console.log(`api shapes checked : ${contractChecked}/${Object.keys(CONTRACT).length}`);
+console.log(`api contract       : ${validation.success ? 'valid' : 'VIOLATED'} (validated by shared/schema.ts)`);
 console.log(`html size          : ${(html.length / 1024).toFixed(1)} KiB`);
 
 // ---------------------------------------------------------------------------
