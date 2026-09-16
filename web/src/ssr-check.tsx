@@ -137,6 +137,17 @@ check(!html.includes('undefined'), 'markup contains literal "undefined"');
 check(!html.includes('NaN'), 'markup contains literal "NaN"');
 check(!html.includes('[object Object]'), 'markup contains "[object Object]"');
 
+// A `//` line sitting in JSX *children* is literal text, not a comment, and is
+// rendered on the page. TypeScript accepts it, the tests pass, and the only
+// symptom is visible garbage in the UI -- which is exactly how a 5-line comment
+// ended up printed inside every GPU model cell. Strip the tags and look for a
+// line that starts with a comment marker (a URL's `https://` never starts one).
+const textContent = html.replace(/<[^>]*>/g, '\n');
+check(
+  !/\n[ \t]*\/\//.test(textContent),
+  'a JSX line comment leaked into the page as visible text',
+);
+
 // ---------------------------------------------------------------------------
 // API contract check.
 //

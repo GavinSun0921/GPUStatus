@@ -1,3 +1,4 @@
+import { WarningFilled } from '@ant-design/icons';
 import { Badge, Card, Col, Progress, Row, Space, Table, Tag, Tooltip, Typography, theme } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { Gpu, GpuProc, Host } from '../types';
@@ -53,7 +54,12 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
     {
       title: '型号',
       dataIndex: 'display_name',
-      width: 188,
+      // Wide enough for the longest name in the fleet plus the throttle marker:
+      // "RTX Pro 6000D (84G)" measures 128px and the marker ~27px, against 184px
+      // of usable width after cell padding. At the previous 188px the pair
+      // overflowed to 172px of content in 172px of space and wrapped to two
+      // lines, which is what broke Server19/Server20's rows once they throttled.
+      width: 200,
       render: (name: string | null, gpu: Gpu) => (
         <Space size={6} align="center">
           {name ? (
@@ -78,8 +84,17 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
                 .filter(Boolean)
                 .join('\n')}
             >
-              <Tag className="throttle-tag" color="warning" style={{ margin: 0, fontSize: 11 }}>
-                ⚠ 降频
+              {/* Icon only: the words "降频" cost 30px, which was the difference
+                  between fitting and wrapping. The reason and the clock ratio
+                  are in the tooltip, and the machine header states the count in
+                  words. NB: inside JSX *children* a `//` line is literal text,
+                  not a comment -- it renders on the page. */}
+              <Tag
+                className="throttle-tag"
+                color="warning"
+                style={{ margin: 0, padding: '0 5px', lineHeight: '16px' }}
+              >
+                <WarningFilled style={{ fontSize: 11 }} />
               </Tag>
             </Tooltip>
           )}
