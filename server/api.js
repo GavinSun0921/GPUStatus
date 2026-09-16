@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * HTTP API.
  *
@@ -146,8 +147,27 @@ function handleStream(req, res, state) {
  *
  * Exported for that test.
  */
+/**
+ * Fingerprint of the config FILE as it is on disk right now.
+ *
+ * The admin page PUTs the whole document back. Without this, a page loaded
+ * before someone else edited the file would save its stale copy over the newer
+ * one -- which really happened: a 15-machine config was silently replaced by
+ * the 6-machine version the open page still held. The backup file kept the
+ * newer copy, but only by luck.
+ */
+export function configRevision(config) {
+  try {
+    return createHash('sha256').update(readFileSync(config.configPath, 'utf8')).digest('hex').slice(0, 16);
+  } catch {
+    // No file yet (first run): the empty revision is honest and still stable.
+    return '';
+  }
+}
+
 export function publicAdminConfig(config) {
   return {
+    revision: configRevision(config),
     site: config.site ?? '',
     announcement: config.announcement ?? { level: 'info', title: '', body: '' },
     poll: {
@@ -366,6 +386,19 @@ export function createApi(app) {
           return true;
         }
 
+        // Refuse to overwrite a file that changed since this page loaded it.
+        // The page PUTs the whole document, so a stale copy would silently drop
+        // whatever the other writer added.
+        const current = configRevision(config());
+        if (body.revision !== current) {
+          json(res, 409, {
+            error:
+              '配置文件已被其他方式修改(例如别人保存、或手工编辑),为避免覆盖对方的改动,本次保存没有执行。请刷新页面后重试。',
+            revision: current,
+          });
+          return true;
+        }
+
         try {
           const { text, validated } = saveConfig(config(), body);
 
@@ -386,6 +419,9 @@ export function createApi(app) {
             ok: true,
             hosts: validated.hosts.length,
             backup: existsSync(backup) ? backup : null,
+            // The file was just rewritten, so hand back the new fingerprint --
+            // otherwise the very next save from this page would 409.
+            revision: configRevision(config()),
           });
         } catch (err) {
           json(res, 400, { error: String(err.message ?? err) });

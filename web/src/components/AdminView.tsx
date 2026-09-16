@@ -382,6 +382,8 @@ function ConfigEditor({
 }) {
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [hosts, setHosts] = useState<EditableHost[]>([]);
+  // Fingerprint of the file this page loaded; see the 409 branch in the API.
+  const [revision, setRevision] = useState('');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -422,6 +424,7 @@ function ConfigEditor({
           body: body.announcement.body,
         },
       });
+      setRevision(body.revision);
       setHosts(body.hosts.map((h, i) => ({ ...h, key: `${h.id}-${i}` })));
     })();
   }, [onLogout]);
@@ -532,6 +535,9 @@ function ConfigEditor({
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          // Lets the server refuse the save if the file changed since load,
+          // instead of silently overwriting the other writer's edits.
+          revision,
           site: config.site,
           announcement: config.announcement,
           poll: config.poll,
@@ -544,6 +550,7 @@ function ConfigEditor({
         setSaveError(body.error ?? `保存失败 (HTTP ${res.status})`);
         return;
       }
+      if (typeof body.revision === 'string') setRevision(body.revision);
       messageApi.success(`已保存并生效:${body.hosts} 台机器${body.backup ? '(原文件已备份为 hosts.json.bak)' : ''}`);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));

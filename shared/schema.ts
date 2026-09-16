@@ -356,6 +356,15 @@ export const EditableHostSchema = z.object({
 });
 
 export const AdminConfigSchema = z.object({
+  /**
+   * Fingerprint of the config file when it was loaded.
+   *
+   * Sent back on save so the server can refuse to overwrite a file that changed
+   * in the meantime. Without it a page left open silently reverts whatever
+   * another writer did -- a 15-machine config was once replaced by the stale
+   * 6-machine copy an open page still held.
+   */
+  revision: z.string(),
   site: z.string(),
   announcement: AnnouncementSchema,
   poll: z.object({

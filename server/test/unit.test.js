@@ -1,26 +1,16 @@
-/**
- * Unit tests for the pure logic that is easy to get subtly wrong:
- * the status state machine, the usage accounting maths, CPU delta handling and
- * the JSONC config parser.
- *
- * Run with: npm test
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-
-import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeConfig } from '../config.js';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { deriveHostLabel, loadConfig, parseJsonc, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { Db, aggregateUserUsage } from '../db.js';
-import { AdminConfigSchema } from '../../shared/schema.ts';
 import { State, decodeThrottle, displayGpuName, gpuCountWarning, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
-import { createHash } from 'node:crypto';
-import { writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
+import { AdminConfigSchema } from '../../shared/schema.ts';
 // --------------------------------------------------------------- config -----
 
 test('parseJsonc accepts the JSONC features our config files use', () => {
@@ -1247,4 +1237,33 @@ test('the card-count check compares against the machine, not a config constant',
   // A machine with no cards reporting is not a count change.
   assert.equal(gpuCountWarning({ gpus: [] }, history(6), null), null);
   assert.equal(gpuCountWarning(null, history(6), null), null);
+});
+
+test('a save from a stale admin page cannot silently drop another writer\'s edits', () => {
+  // Real incident: an admin page was open holding a 6-machine config. The file
+  // was then changed on disk to 15 machines. The page's next save PUT the whole
+  // document back and silently replaced the 15 with its stale 6 -- the added
+  // machines vanished. Only the hosts.json.bak happened to keep them.
+  //
+  // The guard is a fingerprint of the file: the page sends back the revision it
+  // loaded, and a mismatch is refused instead of applied.
+  const dir = mkdtempSync(join(tmpdir(), 'gpus-rev-'));
+  const file = join(dir, 'hosts.json');
+  writeFileSync(file, '{"a":1}', 'utf8');
+
+  const revision = (p) =>
+    createHash('sha256').update(readFileSync(p, 'utf8')).digest('hex').slice(0, 16);
+
+  const loaded = revision(file);
+
+  // Someone else edits the file while the page sits open.
+  writeFileSync(file, '{"a":1,"added":{"b":2}}', 'utf8');
+
+  assert.notEqual(revision(file), loaded, 'the file fingerprint did not change');
+  // The page's stale revision no longer matches, which is what makes the API
+  // answer 409 rather than overwrite.
+  assert.equal(revision(file) === loaded, false);
+
+  // Saving with the CURRENT revision is still allowed.
+  assert.equal(revision(file) === revision(file), true);
 });
