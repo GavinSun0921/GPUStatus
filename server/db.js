@@ -126,6 +126,7 @@ export class Db {
 
     this.#migrate();
     this.#addColumns();
+    this.#migrateIndexes();
     this.#backfillHostHourly();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
@@ -207,6 +208,21 @@ export class Db {
     this.backfilledHours = rows;
   }
 
+  /**
+   * Index changes that an existing database needs.
+   *
+   * `CREATE INDEX IF NOT EXISTS` cannot alter an index that already exists, so
+   * the superseded ones are dropped by name here.
+   */
+  #migrateIndexes() {
+    // Superseded by idx_gpu_sample_prune; unused since the per-GPU history
+    // query was removed.
+    this.db.exec('DROP INDEX IF EXISTS idx_gpu_sample_ts');
+    this.db.exec('DROP INDEX IF EXISTS idx_gpu_sample_uuid');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_gpu_sample_prune ON gpu_sample(ts)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_host_sample_prune ON host_sample(ts)');
+  }
+
   #migrate() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -248,7 +264,12 @@ export class Db {
         n_gpus         INTEGER,
         driver_version TEXT
       );
+      -- (host_id, ts) is a covering index for the "latest timestamp per host"
+      -- lookup on startup, so it stays.
       CREATE INDEX IF NOT EXISTS idx_host_sample_ts ON host_sample(host_id, ts);
+      -- ...but its leading column is host_id, which cannot serve the prune's
+      -- a ts-range condition. Hence a second index on ts alone.
+      CREATE INDEX IF NOT EXISTS idx_host_sample_prune ON host_sample(ts);
 
       CREATE TABLE IF NOT EXISTS gpu_sample (
         ts           INTEGER NOT NULL,
@@ -276,8 +297,13 @@ export class Db {
         power_limit_w    REAL,
         pstate           TEXT
       );
-      CREATE INDEX IF NOT EXISTS idx_gpu_sample_ts ON gpu_sample(host_id, ts);
-      CREATE INDEX IF NOT EXISTS idx_gpu_sample_uuid ON gpu_sample(gpu_uuid, ts);
+      -- Indexed on ts, because the only statement that reads this table in bulk
+      -- is the retention prune (WHERE ts < cutoff). It used to carry
+      -- (host_id, ts) and (gpu_uuid, ts) for the per-GPU history query; that
+      -- query is gone with the 历史 page, and with a leading host_id/gpu_uuid
+      -- neither index could serve a ts-range scan anyway. They were pure cost:
+      -- two index updates for every one of the ~48 rows written per poll.
+      CREATE INDEX IF NOT EXISTS idx_gpu_sample_prune ON gpu_sample(ts);
 
       CREATE TABLE IF NOT EXISTS proc_sample (
         ts           INTEGER NOT NULL,
