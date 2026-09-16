@@ -17,6 +17,7 @@
  *   node tools/screenshot.mjs --viewport            # visible area only
  *   node tools/screenshot.mjs --selector ".summary" # one element, zoomed
  *   node tools/screenshot.mjs --tabs                # one shot per tab
+ *   node tools/screenshot.mjs --expand              # open every 详情 panel first
  *   node tools/screenshot.mjs --url http://host:8787/
  *
  * Requires `playwright-core` (a 5 MB driver, no browser download) and a Chromium
@@ -141,12 +142,41 @@ if (selector) {
   await page.screenshot({ path: out, fullPage });
 }
 
+// Open every machine's detail panel, so a screenshot (and the layout check
+// below) covers the chart and the machine-information grid.
+if (has('--expand')) {
+  for (const button of await page.locator('.detail-toggle').all()) {
+    await button.click().catch(() => {});
+  }
+  await page.waitForTimeout(1500);
+}
+
 const info = await page.evaluate(() => ({
   machines: document.querySelectorAll('[id^="host-"]').length,
   gpuRows: document.querySelectorAll('.gpu-row').length,
   theme: document.documentElement.dataset.theme,
   title: document.title,
   pageHeight: document.documentElement.scrollHeight,
+  // SVG text that spills outside its chart. This is the one class of defect
+  // neither the type system nor the jsdom render check can see: jsdom does no
+  // layout, so every rectangle it reports is zero. Two real bugs have been
+  // exactly this -- a "100%" y-axis label 5px past the left edge (its leading
+  // "1" cut off) and a GPU model column wrapping to two lines -- and both were
+  // found by eye rather than by a check. Non-empty means something is clipped.
+  clippedText: [...document.querySelectorAll('.recharts-wrapper')].flatMap((wrap) => {
+    const wb = wrap.getBoundingClientRect();
+    return [...wrap.querySelectorAll('svg text')]
+      .filter((t) => {
+        const r = t.getBoundingClientRect();
+        return (
+          r.left < wb.left - 0.5 ||
+          r.right > wb.right + 0.5 ||
+          r.top < wb.top - 0.5 ||
+          r.bottom > wb.bottom + 0.5
+        );
+      })
+      .map((t) => t.textContent);
+  }),
 }));
 if (!allTabs) {
   console.log(JSON.stringify({ out, ...info, consoleErrors: errors }, null, 1));

@@ -130,7 +130,16 @@ export function MachineHistory({ hostId }: { hostId: string }) {
       ) : (
         <>
           <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={data} margin={{ top: 6, right: 10, bottom: 0, left: -16 }}>
+            {/* Margins are sized from the LABELS, not guessed:
+                  left   0  -- the -16 that used to be here left the axis 30px
+                               for a 27px "100%", pushing it 5px past the
+                               container and cutting the leading "1" off.
+                  top   10  -- the 100% tick is centred on the top gridline, so
+                               half a line of text sits above the plot.
+                  right 30  -- recharts centre-anchors every x tick, including
+                               the last one, which therefore overhangs the plot
+                               edge by half a label (46px / 2 = 23px). */}
+            <LineChart data={data} margin={{ top: 10, right: 30, bottom: 0, left: 0 }}>
               <CartesianGrid stroke={token.colorBorderSecondary} vertical={false} />
               <XAxis
                 dataKey="label"
