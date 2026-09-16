@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import { parseJsonc, loadConfig, deriveHostLabel, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
-import { aggregateUserUsage } from '../db.js';
+import { Db, aggregateUserUsage } from '../db.js';
 import { AdminConfigSchema } from '../../shared/schema.ts';
 import { State, decodeThrottle, displayGpuName, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
@@ -1159,4 +1159,40 @@ test('the thermal share refuses to reassure from too little history', () => {
 
   const always = Array(100).fill(1);
   assert.equal(thermalShare(always), 100);
+});
+
+test('a sample with a missing metric does not lose the whole hourly row', () => {
+  // Regression: every *_sum column is NOT NULL, and the first poll after a
+  // restart has no previous /proc/stat to diff, so cpuPct is null. Binding that
+  // null threw "NOT NULL constraint failed: host_hourly.cpu_sum" and dropped the
+  // ENTIRE sample -- once per machine per restart. Counting a literal 1 would
+  // have been wrong the other way, recording a sample that never happened.
+  //
+  // Only surfaced on a fresh database on a new machine, which is exactly what
+  // deploying to mgmt2 exercised.
+  const db = new Db(':memory:');
+  const sample = (ts, cpuPct) => ({
+    ts,
+    host: { cpuPct, memPct: 40, ncpu: 8 },
+    gpus: Array.from({ length: 8 }, (_, i) => ({
+      index: i, util: 50, memUsedMib: 1000, memTotalMib: 2000,
+      memUtil: 20, tempC: 60, powerW: 100,
+    })),
+    procs: [], uptimeS: 100, driverVersion: 'x', hostname: 'h', label: null,
+    warnings: [],
+  });
+
+  const t = 1_700_000_000_000;
+  assert.doesNotThrow(() => db.recordSuccess('gpu19', sample(t, null)));
+  assert.doesNotThrow(() => db.recordSuccess('gpu19', sample(t + 15000, 12.5)));
+
+  const row = db.db.prepare('SELECT * FROM host_hourly').get();
+  // The GPU figures were present both times...
+  assert.equal(row.util_n, 2, 'the GPU observation was not counted twice');
+  assert.equal(row.util_sum / row.util_n, 50);
+  // ...while CPU was only measurable the second time, and must not be dragged
+  // toward zero by the unmeasurable first one.
+  assert.equal(row.cpu_n, 1, 'an unmeasurable CPU reading was counted as a sample');
+  assert.equal(row.cpu_sum / row.cpu_n, 12.5);
+  db.close();
 });

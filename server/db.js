@@ -607,24 +607,31 @@ export class Db {
           temp_max_c, power_sum, power_n, n_gpus,
           cpu_sum, cpu_n, sysmem_sum, sysmem_n, memutil_sum, memutil_n,
           throttle_sum, throttle_n)
-        VALUES (?,?,?,1,?,1,?,?,1,?,?,1,?,1,?,1,?,1)
+        -- Every count is a PARAMETER, not a literal 1, because a metric can be
+        -- genuinely absent: the first poll after a restart has no previous
+        -- /proc/stat to diff, so cpuPct is null. Binding null to the NOT NULL
+        -- *_sum column threw "NOT NULL constraint failed: host_hourly.cpu_sum"
+        -- and lost the whole sample -- once per machine per restart. Adding a
+        -- literal 1 to the count would have been wrong too: it would record a
+        -- sample that never happened.
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(bucket_ts, host_id) DO UPDATE SET
           util_sum     = util_sum + excluded.util_sum,
-          util_n       = util_n + 1,
+          util_n       = util_n + excluded.util_n,
           mem_sum      = mem_sum + excluded.mem_sum,
-          mem_n        = mem_n + 1,
+          mem_n        = mem_n + excluded.mem_n,
           temp_max_c   = MAX(COALESCE(temp_max_c, excluded.temp_max_c), excluded.temp_max_c),
           power_sum    = power_sum + excluded.power_sum,
-          power_n      = power_n + 1,
+          power_n      = power_n + excluded.power_n,
           n_gpus       = MAX(COALESCE(n_gpus, 0), excluded.n_gpus),
           cpu_sum      = cpu_sum + excluded.cpu_sum,
-          cpu_n        = cpu_n + 1,
+          cpu_n        = cpu_n + excluded.cpu_n,
           sysmem_sum   = sysmem_sum + excluded.sysmem_sum,
-          sysmem_n     = sysmem_n + 1,
+          sysmem_n     = sysmem_n + excluded.sysmem_n,
           memutil_sum  = memutil_sum + excluded.memutil_sum,
-          memutil_n    = memutil_n + 1,
+          memutil_n    = memutil_n + excluded.memutil_n,
           throttle_sum = throttle_sum + excluded.throttle_sum,
-          throttle_n   = throttle_n + 1`),
+          throttle_n   = throttle_n + excluded.throttle_n`),
 
       upsertRollup: this.db.prepare(`
         INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
@@ -744,6 +751,18 @@ export class Db {
         const bandwidth = gpus
           .map((g) => g.memUtil)
           .filter((v) => typeof v === 'number');
+
+        /**
+         * A single observation, as the (sum, count) pair the table accumulates.
+         *
+         * An absent reading contributes 0 to the sum AND 0 to the count --
+         * never a null sum (the column is NOT NULL) and never a count of 1
+         * (which would record a sample that did not happen).
+         */
+        const obs = (value) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? { sum: value, n: 1 }
+            : { sum: 0, n: 0 };
         // Uses the module-level THROTTLE_BAD_BITS, so the live writer and the
         // backfill cannot disagree about what counts as throttled.
         const throttledCards = gpus.filter(
@@ -751,17 +770,27 @@ export class Db {
         ).length;
 
         if (util.length > 0) {
+          const utilObs = obs(avg(util));
+          const memObs = obs(avg(mem));
+          const powerObs = obs(power.length ? power.reduce((a, b) => a + b, 0) : null);
+          const cpuObs = obs(host.cpuPct);
+          const sysmemObs = obs(host.memPct);
+          const bwObs = obs(avg(bandwidth));
+          // Throttling is a count, not an average: 0 throttled cards is a real
+          // observation and must count as one sample.
+          const throttleObs = { sum: throttledCards, n: 1 };
+
           this.stmt.upsertHostHourly.run(
             Math.floor(ts / HOUR_MS) * HOUR_MS, hostId,
-            util.reduce((a, b) => a + b, 0) / util.length,
-            avg(mem),
+            utilObs.sum, utilObs.n,
+            memObs.sum, memObs.n,
             temps.length ? Math.max(...temps) : null,
-            power.reduce((a, b) => a + b, 0),
+            powerObs.sum, powerObs.n,
             gpus.length,
-            host.cpuPct ?? null,
-            host.memPct ?? null,
-            avg(bandwidth),
-            throttledCards,
+            cpuObs.sum, cpuObs.n,
+            sysmemObs.sum, sysmemObs.n,
+            bwObs.sum, bwObs.n,
+            throttleObs.sum, throttleObs.n,
           );
         }
       }
