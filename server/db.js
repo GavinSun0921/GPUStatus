@@ -145,6 +145,7 @@ export class Db {
     this.#addColumns();
     this.#migrateIndexes();
     this.repairedUsernames = this.#repairTruncatedUsernames();
+    this.#backfillUsagePeak();
     this.#backfillHostHourly();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
@@ -399,6 +400,79 @@ export class Db {
     return merged;
   }
 
+  /**
+   * Record, for each user, how many GPUs they held simultaneously this cycle.
+   *
+   * Called once per cycle with EVERY host's sample, because simultaneity is
+   * only knowable when all machines are in hand at once -- that is exactly what
+   * a per-host rollup cannot express.
+   *
+   * A machine that failed to answer contributes nothing this cycle; its users
+   * are simply not counted here. That is safe because only the MAXIMUM over
+   * time is kept, so a missing cycle can never lower the recorded peak.
+   */
+  recordCyclePeaks(collected) {
+    if (!collected || collected.length === 0) return;
+    const byUser = new Map();
+
+    for (const { hostId, sample } of collected) {
+      for (const proc of sample.procs ?? []) {
+        const username = proc.username ? String(proc.username) : null;
+        if (!username) continue;
+        // One card is identified by (machine, card index) -- the same card
+        // appearing in two processes must not be counted twice.
+        const card = `${hostId}:${proc.gpuIndex}`;
+        let cards = byUser.get(username);
+        if (!cards) {
+          cards = new Set();
+          byUser.set(username, cards);
+        }
+        cards.add(card);
+      }
+    }
+
+    const bucket = Math.floor(Date.now() / HOUR_MS) * HOUR_MS;
+    this.db.exec('BEGIN');
+    try {
+      for (const [username, cards] of byUser) {
+        this.stmt.upsertPeak.run(bucket, username, cards.size);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /**
+   * Rebuild `usage_peak` for the retained window from proc_sample.
+   *
+   * Runs when the table is empty, which is the case on upgrade: the per-sample
+   * rows already hold everything needed, so the history is recoverable rather
+   * than starting from the upgrade moment.
+   */
+  #backfillUsagePeak() {
+    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM usage_peak').get();
+    if (c > 0) return;
+
+    this.db.exec('PRAGMA temp_store = MEMORY');
+    this.db.exec(`
+      INSERT INTO usage_peak (bucket_ts, username, peak_gpus)
+      SELECT CAST(ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} AS bucket,
+             username,
+             MAX(n)
+        FROM (
+          SELECT ts, username, COUNT(*) AS n
+            FROM (SELECT DISTINCT ts, host_id, gpu_index, username
+                    FROM proc_sample WHERE username IS NOT NULL)
+           GROUP BY ts, username
+        )
+       GROUP BY bucket, username
+      ON CONFLICT(bucket_ts, username) DO UPDATE SET
+        peak_gpus = MAX(peak_gpus, excluded.peak_gpus)
+    `);
+  }
+
   #migrate() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -559,6 +633,21 @@ export class Db {
       CREATE INDEX IF NOT EXISTS idx_rollup_user ON usage_rollup(username, bucket_ts);
       CREATE INDEX IF NOT EXISTS idx_rollup_bucket ON usage_rollup(bucket_ts);
 
+      -- Peak number of GPUs one user held AT THE SAME TIME, across every
+      -- machine, per hour.
+      --
+      -- This cannot be derived from usage_rollup: that table is keyed by
+      -- (hour, host, user), so the best it can answer is "the most this user had
+      -- on any ONE machine". A user running 6 GPUs on each of three machines
+      -- simultaneously shows 6 instead of 18. On the 16-machine cluster that
+      -- undercounted 4 of 16 users, one of them by half.
+      CREATE TABLE IF NOT EXISTS usage_peak (
+        bucket_ts  INTEGER NOT NULL,
+        username   TEXT    NOT NULL,
+        peak_gpus  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (bucket_ts, username)
+      );
+
       CREATE TABLE IF NOT EXISTS events (
         ts      INTEGER NOT NULL,
         host_id TEXT    NOT NULL,
@@ -650,6 +739,11 @@ export class Db {
           peak_gpus       = MAX(peak_gpus,       excluded.peak_gpus),
           peak_mem_mib    = MAX(peak_mem_mib,    excluded.peak_mem_mib),
           samples         = samples + 1`),
+
+      upsertPeak: this.db.prepare(`
+        INSERT INTO usage_peak (bucket_ts, username, peak_gpus) VALUES (?,?,?)
+        ON CONFLICT(bucket_ts, username) DO UPDATE SET
+          peak_gpus = MAX(peak_gpus, excluded.peak_gpus)`),
 
       insEvent: this.db.prepare('INSERT INTO events (ts, host_id, kind, message) VALUES (?,?,?,?)'),
       pruneHost: this.db.prepare('DELETE FROM host_sample WHERE ts < ?'),
@@ -893,21 +987,27 @@ export class Db {
       where.push('host_id = ?');
       params.push(hostId);
     }
+    const peakParams = [fromTs, toTs];
     return this.db
       .prepare(`
-        SELECT username,
-               SUM(gpu_seconds)     AS gpu_seconds,
-               SUM(sm_gpu_seconds)  AS sm_gpu_seconds,
-               SUM(mem_mib_seconds) AS mem_mib_seconds,
-               MAX(peak_gpus)       AS peak_gpus,
-               COUNT(DISTINCT host_id)  AS host_count,
-               MIN(bucket_ts)       AS first_seen,
-               MAX(bucket_ts)       AS last_seen
-        FROM usage_rollup
-        WHERE ${where.join(' AND ')}
-        GROUP BY username
+        SELECT r.username,
+               SUM(r.gpu_seconds)     AS gpu_seconds,
+               SUM(r.sm_gpu_seconds)  AS sm_gpu_seconds,
+               SUM(r.mem_mib_seconds) AS mem_mib_seconds,
+               -- Peak read from usage_peak, NOT MAX(usage_rollup.peak_gpus).
+               -- The rollup is per (hour, host, user), so its maximum answers
+               -- "the most on any ONE machine" and silently halves the figure
+               -- for anyone spreading work across machines.
+               (SELECT MAX(p.peak_gpus) FROM usage_peak p
+                 WHERE p.username = r.username
+                   AND p.bucket_ts >= ? AND p.bucket_ts < ?) AS peak_gpus,
+               MIN(r.bucket_ts)       AS first_seen,
+               MAX(r.bucket_ts)       AS last_seen
+        FROM usage_rollup r
+        WHERE ${where.map((w) => w.replace('bucket_ts', 'r.bucket_ts').replace('host_id', 'r.host_id')).join(' AND ')}
+        GROUP BY r.username
         ORDER BY gpu_seconds DESC`)
-      .all(...params);
+      .all(...peakParams, ...params);
   }
 
 

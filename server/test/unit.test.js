@@ -1300,3 +1300,72 @@ test('a host added by hot reload appears where the config puts it, not last', ()
   assert.equal(state.hosts.get('gpu05'), before, 'the host entry was replaced');
   assert.equal(state.hosts.get('gpu05').totalPolls, 42, 'live state was lost on reload');
 });
+
+test('the simultaneous peak spans machines, unlike the per-host rollup', () => {
+  // The usage table showed "the most on any ONE machine". A user running 6 GPUs
+  // on each of three machines at once read as 6 instead of 18 -- on the real
+  // 16-machine cluster this undercounted 4 of 16 users.
+  //
+  // usage_rollup cannot express this: it is keyed by (hour, host, user). Hence
+  // usage_peak, written once per cycle when every host's sample is in hand.
+  const db = new Db(':memory:');
+  const gpu = (index) => ({ gpuIndex: index, username: 'alice' });
+  const sample = (procs) => ({ procs, hostname: 'h', gpus: [], disks: [] });
+
+  db.recordCyclePeaks([
+    { hostId: 'gpu1', sample: sample([gpu(0), gpu(1), gpu(2)]) },
+    { hostId: 'gpu2', sample: sample([gpu(0), gpu(1), gpu(2)]) },
+    { hostId: 'gpu3', sample: sample([gpu(0)]) },
+  ]);
+
+  const row = db.db.prepare('SELECT * FROM usage_peak WHERE username = ?').get('alice');
+  assert.equal(row.peak_gpus, 7, 'the peak did not span machines');
+
+  // The SAME card in two processes must not count twice.
+  db.recordCyclePeaks([
+    { hostId: 'gpu1', sample: sample([gpu(0), gpu(0), gpu(1)]) },
+  ]);
+  db.recordCyclePeaks([{ hostId: 'gpu1', sample: sample([gpu(0)]) }]);
+  assert.equal(
+    db.db.prepare('SELECT peak_gpus FROM usage_peak WHERE username = ?').get('alice').peak_gpus,
+    7,
+    'a repeated card was counted twice, or a lower cycle replaced the peak',
+  );
+
+  // Only the maximum is kept, so a cycle where a machine failed to answer can
+  // never lower the recorded peak.
+  db.recordCyclePeaks([{ hostId: 'gpu1', sample: sample([gpu(0)]) }]);
+  assert.equal(
+    db.db.prepare('SELECT peak_gpus FROM usage_peak WHERE username = ?').get('alice').peak_gpus,
+    7,
+  );
+
+  // An unresolved owner is skipped rather than attributed to nobody.
+  db.recordCyclePeaks([{ hostId: 'gpu9', sample: sample([{ gpuIndex: 0, username: null }]) }]);
+  assert.equal(db.db.prepare('SELECT COUNT(*) AS c FROM usage_peak').get().c, 1);
+  db.close();
+});
+
+test('totals report the simultaneous peak, not the per-machine maximum', () => {
+  // Guards the join: reading MAX(usage_rollup.peak_gpus) here silently halves
+  // the figure for anyone spreading work across machines.
+  const db = new Db(':memory:');
+  const ts = Date.now();
+  const rollup = db.db.prepare(
+    `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+       sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+     VALUES (?,?,?,?,?,?,?,?,1)`,
+  );
+  // Two machines, 6 GPUs each, same hour: the per-host peaks are both 6.
+  for (const host of ['gpu1', 'gpu2']) {
+    rollup.run(Math.floor(ts / 3600000) * 3600000, host, 'alice', 6 * 60, 0, 0, 6, 0);
+  }
+  db.db
+    .prepare('INSERT INTO usage_peak (bucket_ts, username, peak_gpus) VALUES (?,?,?)')
+    .run(Math.floor(ts / 3600000) * 3600000, 'alice', 12);
+
+  const [row] = db.queryUsageTotals({ fromTs: ts - 3600000, toTs: ts + 3600000 });
+  assert.equal(row.peak_gpus, 12, 'the totals query fell back to the per-machine maximum');
+  assert.equal(row.gpu_seconds, 720, 'the GPU-seconds total changed');
+  db.close();
+});

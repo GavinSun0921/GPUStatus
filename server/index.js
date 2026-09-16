@@ -176,6 +176,10 @@ const MAX_EVENT_HISTORY = 500;
 /** Poll every host in parallel and fold the results into state and storage. */
 async function pollCycle() {
   const started = Date.now();
+  // Samples from every host in THIS cycle, gathered so the cross-machine
+  // simultaneity peak can be computed. It cannot be derived per host: a user on
+  // three machines is only knowable as one number when all three are in hand.
+  const collected = [];
 
   await Promise.allSettled(
     app.config.hosts.map(async (host) => {
@@ -190,6 +194,7 @@ async function pollCycle() {
             ...result.sample,
             label: resolveHostLabel(host, result.sample.hostname, app.config.naming),
           });
+          collected.push({ hostId: host.id, sample: result.sample });
         } catch (err) {
           // A storage failure must not be reported as a healthy host, but the UI
           // should still show the freshly collected data.
@@ -208,6 +213,12 @@ async function pollCycle() {
       if (!result.ok) log(`${host.id}: poll failed (${result.durationMs}ms) - ${result.error}`);
     }),
   );
+
+  try {
+    db.recordCyclePeaks(collected);
+  } catch (err) {
+    log(`ERROR recording simultaneous peaks: ${err.message}`);
+  }
 
   state.cycleComplete();
   return Date.now() - started;

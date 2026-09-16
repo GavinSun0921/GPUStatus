@@ -84,8 +84,11 @@ export function UsageView() {
       sorter: (a, b) => a.mem_gib_hours - b.mem_gib_hours,
       render: (v: number) => v.toFixed(1),
     },
-    { title: '峰值卡数', dataIndex: 'peak_gpus', align: 'right', width: 96 },
-    { title: '机器数', dataIndex: 'host_count', align: 'right', width: 84 },
+    // "Peak cards" means the most this user held AT THE SAME TIME, across all
+    // machines -- read from usage_peak, not from the per-host rollup.
+    // A separate machine count was removed: it answered a question nobody
+    // asked, and invited reading the peak as if it were per-machine.
+    { title: '同时使用峰值', dataIndex: 'peak_gpus', align: 'right', width: 118 },
     {
       title: '首次',
       dataIndex: 'first_seen',

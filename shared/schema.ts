@@ -313,8 +313,13 @@ export const UsageTotalsRowSchema = z.object({
   gpu_seconds: z.number(),
   sm_gpu_seconds: z.number(),
   mem_mib_seconds: z.number(),
+  /**
+   * The most GPUs this user held AT THE SAME TIME, across every machine.
+   *
+   * Not the per-machine maximum: a user running 6 GPUs on each of three
+   * machines at once peaks at 18, and the per-host rollup can only ever say 6.
+   */
   peak_gpus: z.number(),
-  host_count: z.number(),
   first_seen: z.number(),
   last_seen: z.number(),
   gpu_hours: z.number(),
