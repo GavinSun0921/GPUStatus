@@ -11,6 +11,21 @@ import { MachineHistory } from './MachineHistory';
 import { MachineInfo } from './MachineInfo';
 
 /**
+ * Temperature at which these cards begin to slow down for heat.
+ *
+ * Empirically derived from this fleet: across 28k samples the thermal-slowdown
+ * bit first appears at 80°C and rises steeply above it. It is NOT a documented
+ * per-SKU figure -- nvidia-smi reports a "GPU Target Temperature" (85°C here)
+ * and several T.Limit values as unexplained offsets -- so it is stated as what
+ * it is rather than dressed up as a specification.
+ *
+ * Module level, and used by both the per-card temperature colour and the
+ * machine cooling meter: two literals would drift, which is exactly how a
+ * hand-written throttle bitmask once ended up as 236 instead of 232.
+ */
+const THERMAL_THROTTLE_C = 80;
+
+/**
  * One machine: a header of labelled meters, then a table with ONE ROW PER CARD.
  *
  * The row models the physical device because that is what the columns describe
@@ -31,16 +46,6 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
   const ageMs = host.last_ok === null ? null : now - host.last_ok;
   const stale = host.status !== 'ok';
   const [showDetail, setShowDetail] = useState(false);
-
-  /**
-   * Temperature at which these cards begin to slow down for heat.
-   *
-   * Empirically derived from this fleet: across 28k samples, the thermal
-   * slowdown bit first appears at 80°C and rises steeply above it. It is not a
-   * documented per-SKU figure -- nvidia-smi reports the target (85°C here) and
-   * T.Limit values as unexplained offsets -- so it is stated as what it is.
-   */
-  const THERMAL_THROTTLE_C = 80;
 
   const temps = host.gpus.map((g) => g.temp_c).filter((t): t is number => t !== null);
   const hottest = temps.length ? Math.max(...temps) : -Infinity;
@@ -154,7 +159,15 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
         <Progress
           percent={gpu.mem_pct ?? 0}
           size="small"
-          strokeColor={colors[severity(gpu.mem_pct)]}
+          // Routine information, like utilisation above it -- NOT the severity
+          // ramp. A card whose memory is full is a card running the job it was
+          // given; painting that red made every healthy busy machine look like
+          // it was on fire, and trains people to ignore red.
+          //
+          // The severity ramp is reserved for readings that mean something is
+          // wrong or about to break: disk exhaustion (jobs cannot write) and
+          // thermal throttling (performance is silently lost).
+          strokeColor={activityColor(gpu.mem_pct, colors)}
           format={() => `${gib(gpu.mem_used_mib)} / ${gib(gpu.mem_total_mib, 0)}`}
         />
       ),
@@ -169,7 +182,9 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
         temp === null ? (
           <Typography.Text type="secondary">—</Typography.Text>
         ) : (
-          <Typography.Text style={temp >= 80 ? { color: colors.danger } : undefined}>
+          <Typography.Text
+            style={temp >= THERMAL_THROTTLE_C ? { color: colors.danger } : undefined}
+          >
             {Math.round(temp)}°C
           </Typography.Text>
         ),
@@ -304,6 +319,9 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
               label="CPU"
               value={pct(host.cpu?.pct, 1)}
               percent={host.cpu?.pct}
+              // A busy CPU is a machine doing work, not a fault. Same reasoning
+              // as GPU utilisation and memory.
+              color={colors.accent}
               // One load figure inline; the full 1/5/15-minute triplet is in
               // the tooltip. Printing all three made the line dense and, on a
               // steady machine, showed essentially the same number three times.

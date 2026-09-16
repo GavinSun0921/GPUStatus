@@ -67,3 +67,41 @@ test('no hardcoded colours outside the theme layer', () => {
 
   assert.deepEqual(offenders, [], `hardcoded colours found:\n  ${offenders.join('\n  ')}`);
 });
+
+test('the severity ramp is reserved for things that are actually wrong', () => {
+  // Colour on this dashboard has to mean "something is wrong", or people stop
+  // reading it. The severity ramp (green -> amber -> red) therefore belongs only
+  // to readings whose bad state breaks something:
+  //
+  //   disk usage       a full disk stops jobs writing checkpoints
+  //   system memory    exhaustion triggers the OOM killer
+  //   temperature      at the throttle point performance is silently lost
+  //
+  // It must NOT be applied to load, however high: a card at 100% utilisation
+  // with full memory is a card running the job it was given. Every GPU that is
+  // busy looked like an alarm until this was separated out.
+  const machine = read('src/components/Machine.tsx');
+
+  // Load metrics go through the neutral activity colour.
+  assert.match(
+    machine,
+    /strokeColor=\{activityColor\(util, colors\)\}/,
+    'GPU utilisation does not use the neutral activity colour',
+  );
+  assert.match(
+    machine,
+    /strokeColor=\{activityColor\(gpu\.mem_pct, colors\)\}/,
+    'GPU memory does not use the neutral activity colour',
+  );
+  assert.ok(
+    !/severity\(gpu\.mem_pct\)/.test(machine),
+    'GPU memory is painted with the severity ramp -- a full card is expected, not a fault',
+  );
+
+  // The two that must keep it.
+  assert.match(
+    machine,
+    /severity\(disk\.use_pct\)/,
+    'disk usage no longer uses the severity ramp',
+  );
+});
