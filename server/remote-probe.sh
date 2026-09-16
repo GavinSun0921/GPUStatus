@@ -128,7 +128,16 @@ else
     }')
   # etime (elapsed time) rides along on the same ps call -- no extra process --
   # so the UI can show how long a job has been holding a card.
-  [ -n "$PIDS" ] && PID_USERS=$(ps -o pid=,user=,etime= -p "$PIDS" 2>/dev/null)
+  #
+  # `user:32=` is REQUIRED, not cosmetic. With several output columns ps applies
+  # its default widths instead of sizing to the content, and USER defaults to 8
+  # characters: `luzhicheng` came back as `luzhich+`. That truncation reached the
+  # usage rollup, where it split one person's GPU-hours across two rows under two
+  # different names -- a wrong answer in the year-end accounting, not just a
+  # cosmetic problem. 32 is the maximum Linux username length, so this cannot
+  # truncate. (A single `-o user=` column happens to auto-size, which is why the
+  # bug only appeared once etime was added.)
+  [ -n "$PIDS" ] && PID_USERS=$(ps -o pid=,user:32=,etime= -p "$PIDS" 2>/dev/null)
 fi
 
 # Driver version, taken from /proc rather than from a fourth nvidia-smi call.

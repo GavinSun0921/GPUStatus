@@ -59,3 +59,26 @@ test('template literals in server sources are balanced', () => {
     );
   }
 });
+
+test('ps invocations pin the USER column width', () => {
+  // With several output columns `ps` applies its default widths rather than
+  // sizing to the content, and USER defaults to 8 characters. `ps -o
+  // pid=,user=,etime=` therefore returned `luzhich+` for `luzhicheng`, and that
+  // truncated name reached the usage rollup -- splitting one person's GPU-hours
+  // across two rows in the accounting table.
+  //
+  // A bare `-o user=` column auto-sizes, which is why this only appeared once a
+  // second column was added. Any `user=` in a ps format list must carry an
+  // explicit width.
+  const probe = readFileSync(join(SERVER, 'remote-probe.sh'), 'utf8');
+  const problems = [];
+  for (const line of probe.split('\n')) {
+    if (!/\bps\b/.test(line) || line.trimStart().startsWith('#')) continue;
+    if (/user=(?![0-9])/.test(line)) problems.push(line.trim());
+  }
+  assert.deepEqual(
+    problems,
+    [],
+    `ps -o user= without a width truncates to 8 characters:\n  ${problems.join('\n  ')}`,
+  );
+});

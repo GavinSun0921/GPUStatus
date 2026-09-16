@@ -144,6 +144,7 @@ export class Db {
     this.#migrate();
     this.#addColumns();
     this.#migrateIndexes();
+    this.repairedUsernames = this.#repairTruncatedUsernames();
     this.#backfillHostHourly();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
@@ -315,6 +316,86 @@ export class Db {
     this.db.exec('DROP INDEX IF EXISTS idx_gpu_sample_uuid');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_gpu_sample_prune ON gpu_sample(ts)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_host_sample_prune ON host_sample(ts)');
+  }
+
+  /**
+   * Undo the damage from a username-truncating `ps` invocation.
+   *
+   * `ps -o pid=,user=,etime=` applies its default 8-character USER width (a
+   * single `-o user=` column happens to auto-size, which is why this only
+   * appeared once `etime` was added). `luzhicheng` was collected as `luzhich+`,
+   * and that short name went into `usage_rollup` -- so one person's GPU-hours
+   * were split across two rows under two different names. In an accounting
+   * table that is a wrong answer, not a cosmetic bug.
+   *
+   * A truncated name is repaired only when EXACTLY ONE longer username starts
+   * with the same stem. Two people sharing a 7-character prefix cannot be told
+   * apart from the data alone, so those are left alone and reported instead of
+   * being guessed at.
+   *
+   * @returns {Array<[string, string]>} pairs actually merged
+   */
+  #repairTruncatedUsernames() {
+    const names = this.db
+      .prepare(
+        `SELECT DISTINCT username FROM (
+           SELECT username FROM proc_sample
+           UNION SELECT username FROM usage_rollup
+         ) WHERE username IS NOT NULL`,
+      )
+      .all()
+      .map((r) => r.username);
+
+    const suspects = names.filter((u) => /\+$/.test(u));
+    if (suspects.length === 0) return [];
+
+    const merged = [];
+    const ambiguous = [];
+    for (const bad of suspects) {
+      const stem = bad.replace(/\++$/, '');
+      if (stem.length === 0) continue;
+      const candidates = names.filter(
+        (u) => u !== bad && !/\+$/.test(u) && u.startsWith(stem) && u.length > stem.length,
+      );
+      if (candidates.length === 1) merged.push([bad, candidates[0]]);
+      else if (candidates.length > 1) ambiguous.push([bad, candidates]);
+    }
+
+    this.db.exec('BEGIN');
+    try {
+      for (const [bad, full] of merged) {
+        this.db.prepare('UPDATE proc_sample SET username = ? WHERE username = ?').run(full, bad);
+        // Merge the rollup rows rather than renaming: the full name usually
+        // already has a row for the same (hour, host), and simply renaming would
+        // violate the primary key or silently drop one side's GPU-hours.
+        this.db
+          .prepare(
+            `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+               sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+             SELECT bucket_ts, host_id, ?, gpu_seconds, sm_gpu_seconds, mem_mib_seconds,
+                    peak_gpus, peak_mem_mib, samples
+               FROM usage_rollup WHERE username = ?
+             ON CONFLICT(bucket_ts, host_id, username) DO UPDATE SET
+               gpu_seconds     = gpu_seconds + excluded.gpu_seconds,
+               sm_gpu_seconds  = sm_gpu_seconds + excluded.sm_gpu_seconds,
+               mem_mib_seconds = mem_mib_seconds + excluded.mem_mib_seconds,
+               peak_gpus       = MAX(peak_gpus, excluded.peak_gpus),
+               peak_mem_mib    = MAX(peak_mem_mib, excluded.peak_mem_mib),
+               samples         = samples + excluded.samples`,
+          )
+          .run(full, bad);
+        this.db.prepare('DELETE FROM usage_rollup WHERE username = ?').run(bad);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    if (ambiguous.length > 0) {
+      this.truncatedNameAmbiguities = ambiguous;
+    }
+    return merged;
   }
 
   #migrate() {
