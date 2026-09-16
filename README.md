@@ -580,26 +580,35 @@ node -e "console.log(require('crypto').createHash('sha256').update('你的密码
 > 实际发现的例子:Server19 有 5 张卡处于热降频,SM 时钟 930 MHz / 最高 3105 MHz,
 > 风扇已 100% 仍压不住,累计热降频时长达 46 小时 —— 而只看看板上的利用率,它是满绿的。
 
-### 历史曲线 `/history`
+### 显卡利用率趋势(每台机器的展开详情)
 
-选机器 + 选时段(1 小时 / 6 小时 / 24 小时 / 3 天),看利用率、占用比例、温度、功耗的趋势。
-数据本来就为用量统计存着,这个页面只是把它画出来。
+每台机器标题栏右侧有「详情」开关,**默认收起**。展开后立即看到该机器
+整机所有显卡的平均利用率趋势,可选 **24 小时 / 3 天 / 7 天 / 30 天**。
 
-窗口受 `db.raw_retention_hours`(默认 168 小时)限制,更早的只剩按小时的用量汇总。
+图表放在卡片顶部(而不是底部),因为开关的意义就是"看到趋势" —— 放在
+八行显卡表和磁盘面板之后,点了详情会像是没反应。
 
-**图表库选了 recharts**,但依据不是体积,而是**运行开销** —— 大屏一开就是几周,持续吃 CPU 才是真问题。
-用 CDP 的 `Performance.getMetrics` 实测同一页面 30 秒窗口内的渲染进程 CPU 时间:
+**数据来自 `host_hourly` 表(按小时汇总,永不清理)**,不是原始采样:
 
-| 方案 | CPU / 30s | 单核占用 | 打包体积 |
-|---|---|---|---|
-| 无图表库(对照) | 0.11s | 0.37% | — |
-| **recharts** | **0.21s** | **0.70%** | 453 KB gzip |
-| @ant-design/plots | 2.38s | **7.9%** | 780 KB gzip |
+| | 原始采样(`gpu_sample`) | 小时汇总(`host_hourly`) |
+|---|---|---|
+| 保留 | `raw_retention_hours`(默认 168 小时) | **永久** |
+| 体量 | 约 27 万行/天(约 32 MB/天) | 约 144 行/天 |
+| 30 天 | 约 **950 MB** | 约 4 千行 |
 
-`@ant-design/plots` 是 antd 的配套库、样式最统一,但常驻开销是 recharts 的 **11 倍**
-(相对无图表的基准是 21 倍),所以没有采用。复测两次,数值稳定在 ±0.3 个百分点内。
+所以 30 天档位不可能用原始数据。汇总表存的是**和与计数**(`util_sum`/`util_n`),
+运行平均值在任何采样数下都精确。
+
+- **空闲小时记 0%**,不是空洞 —— `usage_rollup` 只在有人用卡时才有行,
+  用它画"这台机器忙不忙"会把闲置时段显示成断线
+- **首次升级会自动回填**:表为空时从仍在保留期内的原始采样重建,
+  否则新功能上线后图表要空等一小时才有数据
+
+> 这条时间线是"机器忙不忙";"谁用了多少"是另一回事,见「用量」页。
 
 ---
+
+### 主题:自动 / 亮 / 暗---
 
 ### 主题:自动 / 亮 / 暗
 
@@ -704,8 +713,7 @@ node -e "console.log(require('crypto').createHash('sha256').update('你的密码
 | `GET /api/usage/totals?from=-30d&host=` | 按用户汇总用量(年终报表) |
 | `GET /api/usage?from=-24h&bucket=3600&user=&host=` | 时间序列用量,`bucket` 秒可重分桶 |
 | `GET /api/usage/users` | 近期出现过的用户名 |
-| `GET /api/history/host?host=gpu19&from=-6h` | 主机 CPU/内存历史(自动降采样) |
-| `GET /api/history/gpu?host=gpu19&gpu=0&from=-6h` | 单卡历史(自动降采样) |
+| `GET /api/history/machine?host=gpu19&from=-24h` | 该机器按小时的利用率趋势(永不清理的 `host_hourly`) |
 | `GET /api/events?limit=100&host=` | 上下线事件记录 |
 | `GET /api/admin/session` | 管理页登录状态(无需登录) |
 | `POST /api/admin/login` | 登录,成功后下发 HttpOnly 会话 Cookie |
@@ -820,23 +828,25 @@ A: 能。API 已开启 CORS,`/api/*` 是全部契约;把 `web/dist` 交给任意
 ```
 GPUStatus/
 ├── config/hosts.json          # ★ 要监控哪些机器(唯一需要改的配置)
+├── shared/
+│   └── schema.ts              # ★ 接口约定的唯一来源(zod),前后端共用同一文件
 ├── server/
 │   ├── index.js               # 入口:轮询调度 + HTTP 服务 + 静态托管
-│   ├── config.js              # JSONC 配置解析与校验 + hostname → 显示名解析
+│   ├── config.js              # 配置解析与归一化
+│   ├── config-schema.ts       # 配置文件结构校验(zod)
 │   ├── collector.js           # SSH 传输 + uuid/pid/user 关联
 │   ├── remote-probe.sh        # ★ 在目标机器上运行的只读探针(POSIX sh)
-│   ├── db.js                  # SQLite 表结构、写入、用量汇总、清理
-│   ├── state.js               # 内存状态 + 状态灯状态机 + 事件
+│   ├── db.js                  # 表结构、写入、用量汇总、小时汇总、清理
+│   ├── state.js               # 内存状态 + 状态灯状态机 + 降频解码 + 事件
 │   ├── api.js                 # REST + SSE + 管理接口
 │   ├── auth.js                # 管理页认证(签名 Cookie / 限流 / 常量时间比较)
 │   └── test/unit.test.js      # 单元测试(npm test)
 ├── web/                       # React + Vite + TypeScript 前端
 │   ├── src/
 │   │   ├── {api,format,types,theme}.ts, App.tsx, main.tsx, styles.css
-│   │   ├── components/
-│   │   ├── HistoryView.tsx        # Machine / Overview / Reports / AdminView
-│   │   └── render-check.tsx   # 渲染冒烟测试(npm run check:render)
-│   └── test/theme.test.js     # 主题与 CSS 变量不变量测试(npm test)
+│   │   ├── components/        # Machine / MachineHistory / Overview / Reports / AdminView …
+│   │   └── render-check.tsx   # 渲染冒烟测试(npm run check:render,jsdom)
+│   └── test/theme.test.js     # 主题与颜色不变量测试(npm test)
 ├── tools/screenshot.mjs       # 截图工具(npm run screenshot)
 ├── deploy/gpustatus.service   # systemd 单元
 └── data/gpustatus.db          # SQLite(自动创建,需纳入备份)

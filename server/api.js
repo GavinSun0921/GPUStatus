@@ -478,48 +478,21 @@ export function createApi(app) {
       }
 
       // -------------------------------------------------------- history -----
-      case '/api/history/gpu': {
-        const hostId = searchParams.get('host');
-        const gpuIndex = Number(searchParams.get('gpu'));
-        if (!hostId || !Number.isInteger(gpuIndex)) {
-          json(res, 400, { error: 'host and integer gpu parameters are required' });
-          return true;
-        }
-        const { from, to } = resolveWindow(searchParams, 6 * HOUR_MS);
-        json(res, 200, {
-          host: hostId,
-          gpu: gpuIndex,
-          from,
-          to,
-          points: db.queryGpuHistory(hostId, gpuIndex, from, to),
-        });
-        return true;
-      }
-
+      // Per-machine utilisation trend, served from the hourly rollup so every
+      // range the UI offers works, including past the raw-retention window.
       case '/api/history/machine': {
         const hostId = searchParams.get('host');
         if (!hostId) {
           json(res, 400, { error: 'host parameter is required' });
           return true;
         }
-        const { from, to } = resolveWindow(searchParams, 6 * HOUR_MS);
+        const { from, to } = resolveWindow(searchParams, 24 * HOUR_MS);
         json(res, 200, {
           host: hostId,
           from,
           to,
-          points: db.queryMachineHistory(hostId, from, to),
+          points: db.queryHostHourly(hostId, from, to),
         });
-        return true;
-      }
-
-      case '/api/history/host': {
-        const hostId = searchParams.get('host');
-        if (!hostId) {
-          json(res, 400, { error: 'host parameter is required' });
-          return true;
-        }
-        const { from, to } = resolveWindow(searchParams, 6 * HOUR_MS);
-        json(res, 200, { host: hostId, from, to, points: db.queryHostHistory(hostId, from, to) });
         return true;
       }
 

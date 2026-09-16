@@ -208,6 +208,14 @@ check(
   `rendered ${countOf('cell-model')} GPU model cells, expected ${expectedGpus}`,
 );
 
+// Every machine must offer its detail toggle, and the chart must NOT be in the
+// initial markup -- it is collapsed by default and fetched on demand, so a
+// chart appearing here would mean the lazy behaviour had been lost.
+check(
+  countOf('detail-toggle') === snapshot.hosts.length,
+  `rendered ${countOf('detail-toggle')} detail toggles, expected ${snapshot.hosts.length}`,
+);
+
 // A dedicated column, not a footnote under the index.
 check(html.includes('型号'), 'GPU model column header missing');
 
@@ -327,6 +335,7 @@ console.log(`index/model cells  : ${countOf('cell-index')} / ${countOf('cell-mod
 console.log(`disk tiles         : ${countOf('disk-tile')} (expected ${expectedDisks}, selected only)`);
 console.log(`net-mount blocks   : ${countOf('net-tile')} (expected ${expectedNetMounts})`);
 console.log(`user rows          : ${countOf('user-row')} (expected ${snapshot.users.length})`);
+console.log(`detail toggles     : ${countOf('detail-toggle')} (one per machine, charts collapsed)`);
 console.log(`users rendered     : ${snapshot.users.map((u) => u.username).join(', ')}`);
 console.log(`api contract       : ${validation.success ? 'valid' : 'VIOLATED'} (validated by shared/schema.ts)`);
 console.log(`html size          : ${(html.length / 1024).toFixed(1)} KiB`);

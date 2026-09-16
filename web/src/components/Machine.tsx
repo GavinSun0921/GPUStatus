@@ -1,11 +1,13 @@
-import { WarningFilled } from '@ant-design/icons';
-import { Badge, Card, Col, Progress, Row, Space, Table, Tag, Tooltip, Typography, theme } from 'antd';
+import { DownOutlined, WarningFilled } from '@ant-design/icons';
+import { Button, Badge, Card, Col, Progress, Row, Space, Table, Tag, Tooltip, Typography, theme } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { useState } from 'react';
 import type { Gpu, GpuProc, Host } from '../types';
 import { duration, gib, num, pct, warningLabel, ago } from '../format';
 import { activityColor, severity, useSeverityColors } from '../severity';
 import { StatusLight } from './StatusLight';
 import { HostNote } from './Announcement';
+import { MachineHistory } from './MachineHistory';
 
 /**
  * One machine: a header of labelled meters, then a table with ONE ROW PER CARD.
@@ -27,6 +29,7 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
 
   const ageMs = host.last_ok === null ? null : now - host.last_ok;
   const stale = host.status !== 'ok';
+  const [showDetail, setShowDetail] = useState(false);
 
   const allocated = host.gpus.filter((g) => g.n_procs > 0).length;
   // A host that has never been polled reports nothing, which is NOT the same as
@@ -195,10 +198,31 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
         </Space>
       }
       extra={
-        <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>
-          驱动 {host.driver_version ?? '—'} · 运行 {duration(host.uptime_s)}
-          {stale && host.last_ok !== null && ` · 数据 ${ago(ageMs)}`}
-        </Typography.Text>
+        <Space size={10} align="center">
+          <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>
+            驱动 {host.driver_version ?? '—'} · 运行 {duration(host.uptime_s)}
+            {stale && host.last_ok !== null && ` · 数据 ${ago(ageMs)}`}
+          </Typography.Text>
+          {/* Collapsed by default: the machine list is for scanning status, and
+              a trend chart on every card would bury that. */}
+          <Button
+            type="text"
+            size="small"
+            className="detail-toggle"
+            onClick={() => setShowDetail((v) => !v)}
+            style={{ fontSize: 12 }}
+          >
+            {showDetail ? '收起' : '详情'}
+            <DownOutlined
+              style={{
+                fontSize: 10,
+                marginLeft: 4,
+                transition: 'transform .2s',
+                transform: showDetail ? 'rotate(180deg)' : undefined,
+              }}
+            />
+          </Button>
+        </Space>
       }
       styles={{ body: { padding: 0 } }}
     >
@@ -241,6 +265,12 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
           warnings so an operational problem is never pushed out of sight by an
           informational note. */}
       {host.note && <HostNote note={host.note} tone={noteBorder} />}
+
+      {/* Directly under the header, above the meters and the card table: the
+          point of the toggle is to SEE the trend, and at the bottom of the card
+          clicking 详情 looked like it had done nothing until you scrolled past
+          eight GPU rows and the disk panel. */}
+      {showDetail && <MachineHistory hostId={host.id} />}
 
       <div style={{ padding: '12px 16px 4px' }}>
         <Row gutter={[28, 12]}>

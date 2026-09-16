@@ -126,6 +126,7 @@ export class Db {
 
     this.#migrate();
     this.#addColumns();
+    this.#backfillHostHourly();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
   }
@@ -152,6 +153,58 @@ export class Db {
       if (existing.some((c) => c.name === column)) continue;
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
+  }
+
+  /**
+   * Populate `host_hourly` from the raw samples that are still on disk.
+   *
+   * Without this, shipping the chart would show an empty graph for everyone
+   * until a fresh hour had been collected, even though the raw data for the last
+   * `raw_retention_hours` is right there. Runs once: it checks whether the table
+   * is empty rather than tracking a flag, so it is also self-healing if the
+   * table is ever dropped.
+   *
+   * Averaged per hour and per host, matching what the live writer produces.
+   */
+  #backfillHostHourly() {
+    const { c } = this.db.prepare('SELECT COUNT(*) AS c FROM host_hourly').get();
+    if (c > 0) return;
+
+    const available = this.db
+      .prepare('SELECT COUNT(*) AS c FROM gpu_sample WHERE util_pct IS NOT NULL')
+      .get().c;
+    if (available === 0) return;
+
+    // Temp tables in memory. The GROUP BY over every raw sample needs a sort,
+    // and SQLite's default is a temp FILE whose location comes from the
+    // environment -- on a machine where that directory is not writable the whole
+    // statement fails with a bare "unable to open database file". It is also
+    // simply faster here; the data is small enough to sort in RAM.
+    this.db.exec('PRAGMA temp_store = MEMORY');
+
+    // `COUNT(*) / COUNT(DISTINCT ts)` = average GPU rows per poll in the hour,
+    // i.e. the card count. Cheaper and clearer than a correlated subquery per
+    // row, which is what the first version used.
+    this.db.exec(`
+      INSERT INTO host_hourly (bucket_ts, host_id, util_sum, util_n, mem_sum, mem_n,
+        temp_max_c, power_sum, power_n, n_gpus)
+      SELECT CAST(ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} AS bucket_ts,
+             host_id,
+             SUM(util_pct),
+             COUNT(util_pct),
+             SUM(CASE WHEN mem_total_mib > 0 THEN mem_used_mib / mem_total_mib * 100 END),
+             COUNT(CASE WHEN mem_total_mib > 0 THEN 1 END),
+             MAX(temp_c),
+             SUM(COALESCE(power_w, 0)),
+             COUNT(power_w),
+             CAST(COUNT(*) AS INTEGER) / COUNT(DISTINCT ts)
+      FROM gpu_sample
+      WHERE util_pct IS NOT NULL
+      GROUP BY bucket_ts, host_id
+    `);
+
+    const { c: rows } = this.db.prepare('SELECT COUNT(*) AS c FROM host_hourly').get();
+    this.backfilledHours = rows;
   }
 
   #migrate() {
@@ -241,6 +294,32 @@ export class Db {
       CREATE INDEX IF NOT EXISTS idx_proc_sample_user ON proc_sample(username, ts);
       CREATE INDEX IF NOT EXISTS idx_proc_sample_host ON proc_sample(host_id, ts);
 
+      -- Machine-level rollup, one row per hour, NEVER pruned.
+      --
+      -- The raw tables are deleted after raw_retention_hours (default 7 days),
+      -- which is not long enough for a "how busy was this machine over the last
+      -- month" chart. Keeping the raw rows that long is not an option either:
+      -- ~273k rows/day (~32 MB/day) means a month would approach a gigabyte.
+      --
+      -- This is what that chart actually needs, at ~144 rows/day in total.
+      -- Sums and counts are accumulated rather than an average, so the running
+      -- average stays exact regardless of how many samples land in the hour.
+      -- Averages rather than integrals because the question is "how utilised
+      -- was this machine", not "how much did anyone use" -- that is usage_rollup.
+      CREATE TABLE IF NOT EXISTS host_hourly (
+        bucket_ts  INTEGER NOT NULL,
+        host_id    TEXT    NOT NULL,
+        util_sum   REAL    NOT NULL DEFAULT 0,
+        util_n     INTEGER NOT NULL DEFAULT 0,
+        mem_sum    REAL    NOT NULL DEFAULT 0,
+        mem_n      INTEGER NOT NULL DEFAULT 0,
+        temp_max_c REAL,
+        power_sum  REAL    NOT NULL DEFAULT 0,
+        power_n    INTEGER NOT NULL DEFAULT 0,
+        n_gpus     INTEGER,
+        PRIMARY KEY (bucket_ts, host_id)
+      );
+
       CREATE TABLE IF NOT EXISTS usage_rollup (
         bucket_ts       INTEGER NOT NULL,
         host_id         TEXT    NOT NULL,
@@ -304,6 +383,20 @@ export class Db {
         INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username,
           proc_name, used_mem_mib, sm_pct)
         VALUES (?,?,?,?,?,?,?,?,?)`),
+
+      upsertHostHourly: this.db.prepare(`
+        INSERT INTO host_hourly (bucket_ts, host_id, util_sum, util_n, mem_sum, mem_n,
+          temp_max_c, power_sum, power_n, n_gpus)
+        VALUES (?,?,?,1,?,1,?,?,1,?)
+        ON CONFLICT(bucket_ts, host_id) DO UPDATE SET
+          util_sum   = util_sum + excluded.util_sum,
+          util_n     = util_n + 1,
+          mem_sum    = mem_sum + excluded.mem_sum,
+          mem_n      = mem_n + 1,
+          temp_max_c = MAX(COALESCE(temp_max_c, excluded.temp_max_c), excluded.temp_max_c),
+          power_sum  = power_sum + excluded.power_sum,
+          power_n    = power_n + 1,
+          n_gpus     = MAX(COALESCE(n_gpus, 0), excluded.n_gpus)`),
 
       upsertRollup: this.db.prepare(`
         INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
@@ -403,6 +496,28 @@ export class Db {
           ts, hostId, n(p.gpuIndex), s(p.gpuUuid), n(p.pid), s(p.username),
           s(p.name), n(p.usedMemMib), n(p.smPct),
         );
+      }
+
+      // Machine-level hourly rollup. Records even when nothing is running, so an
+      // idle hour shows as 0% rather than as a gap in the chart -- usage_rollup
+      // only has rows for hours somebody used a GPU.
+      {
+        const util = gpus.map((g) => g.util).filter((v) => typeof v === 'number');
+        const mem = gpus
+          .filter((g) => typeof g.memUsedMib === 'number' && typeof g.memTotalMib === 'number' && g.memTotalMib > 0)
+          .map((g) => (g.memUsedMib / g.memTotalMib) * 100);
+        const temps = gpus.map((g) => g.tempC).filter((v) => typeof v === 'number');
+        const power = gpus.map((g) => g.powerW).filter((v) => typeof v === 'number');
+        if (util.length > 0) {
+          this.stmt.upsertHostHourly.run(
+            Math.floor(ts / HOUR_MS) * HOUR_MS, hostId,
+            util.reduce((a, b) => a + b, 0) / util.length,
+            mem.length ? mem.reduce((a, b) => a + b, 0) / mem.length : null,
+            temps.length ? Math.max(...temps) : null,
+            power.reduce((a, b) => a + b, 0),
+            gpus.length,
+          );
+        }
       }
 
       if (dtS > 0) {
@@ -514,92 +629,29 @@ export class Db {
       .all(...params);
   }
 
-  /** Down-sampled GPU history for charts (bucketed average). */
-  queryGpuHistory(hostId, gpuIndex, fromTs, toTs, buckets = 120) {
-    const span = Math.max(1, toTs - fromTs);
-    const width = Math.max(1000, Math.floor(span / buckets));
-    return this.db
-      .prepare(`
-        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
-               AVG(util_pct)     AS util_pct,
-               AVG(mem_used_mib) AS mem_used_mib,
-               AVG(temp_c)       AS temp_c,
-               AVG(power_w)      AS power_w
-        FROM gpu_sample
-        WHERE host_id = ? AND gpu_index = ? AND ts >= ? AND ts < ?
-        GROUP BY bucket ORDER BY bucket ASC`)
-      .all(width, width, hostId, gpuIndex, fromTs, toTs);
-  }
 
   /**
-   * Down-sampled history for ONE machine, with the GPU figures folded in.
+   * Hourly history for one machine, from the never-pruned rollup.
    *
-   * Two queries rather than a SQL join: gpu_sample holds one row per card per
-   * tick, so it has to be reduced to one row per bucket before it can be joined
-   * to host_sample, and doing that in SQL would need a nested aggregate that is
-   * far harder to read than merging two small arrays here.
-   *
-   * Temperature is a MAX (the hottest card is the interesting one); power is a
-   * SUM (whole-machine draw); utilisation and memory are averages across cards.
+   * Every range the UI offers (24h / 3d / 7d / 30d) is served from the same
+   * table, so the chart does not change character at the raw-retention
+   * boundary, and an idle hour is a 0 rather than a hole.
    */
-  queryMachineHistory(hostId, fromTs, toTs, buckets = 120) {
-    const span = Math.max(1, toTs - fromTs);
-    const width = Math.max(1000, Math.floor(span / buckets));
-
-    const host = this.db
-      .prepare(`
-        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
-               AVG(cpu_pct)  AS cpu_pct,
-               AVG(mem_pct)  AS mem_pct,
-               AVG(load1)    AS load1
-        FROM host_sample
-        WHERE host_id = ? AND ts >= ? AND ts < ?
-        GROUP BY bucket ORDER BY bucket ASC`)
-      .all(width, width, hostId, fromTs, toTs);
-
-    const gpu = this.db
-      .prepare(`
-        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
-               AVG(util_pct)                          AS gpu_util,
-               AVG(mem_used_mib)                      AS mem_used,
-               AVG(CASE WHEN mem_total_mib > 0 THEN mem_total_mib END) AS mem_total,
-               MAX(temp_c)                            AS temp_c,
-               SUM(power_w)                           AS power_w
-        FROM gpu_sample
-        WHERE host_id = ? AND ts >= ? AND ts < ?
-        GROUP BY bucket ORDER BY bucket ASC`)
-      .all(width, width, hostId, fromTs, toTs);
-
-    const byBucket = new Map();
-    for (const r of host) byBucket.set(r.bucket, { bucket: r.bucket, ...r });
-    for (const r of gpu) {
-      const point = byBucket.get(r.bucket) ?? { bucket: r.bucket };
-      point.gpu_util = r.gpu_util;
-      point.gpu_mem_pct =
-        r.mem_used !== null && r.mem_total ? (r.mem_used / r.mem_total) * 100 : null;
-      point.temp_c = r.temp_c;
-      point.power_w = r.power_w;
-      byBucket.set(r.bucket, point);
-    }
-
-    return [...byBucket.values()].sort((a, b) => a.bucket - b.bucket);
-  }
-
-  /** Down-sampled host history for charts. */
-  queryHostHistory(hostId, fromTs, toTs, buckets = 120) {
-    const span = Math.max(1, toTs - fromTs);
-    const width = Math.max(1000, Math.floor(span / buckets));
+  queryHostHourly(hostId, fromTs, toTs) {
     return this.db
       .prepare(`
-        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket,
-               AVG(cpu_pct)    AS cpu_pct,
-               AVG(mem_pct)    AS mem_pct,
-               AVG(load1)      AS load1
-        FROM host_sample
-        WHERE host_id = ? AND ts >= ? AND ts < ?
-        GROUP BY bucket ORDER BY bucket ASC`)
-      .all(width, width, hostId, fromTs, toTs);
+        SELECT bucket_ts AS bucket,
+               CASE WHEN util_n  > 0 THEN util_sum  / util_n  END AS gpu_util,
+               CASE WHEN mem_n   > 0 THEN mem_sum   / mem_n   END AS gpu_mem_pct,
+               temp_max_c AS temp_c,
+               CASE WHEN power_n > 0 THEN power_sum / power_n END AS power_w,
+               n_gpus
+        FROM host_hourly
+        WHERE host_id = ? AND bucket_ts >= ? AND bucket_ts < ?
+        ORDER BY bucket_ts ASC`)
+      .all(hostId, fromTs, toTs);
   }
+
 
   queryEvents({ limit = 100, hostId = null } = {}) {
     if (hostId) {
