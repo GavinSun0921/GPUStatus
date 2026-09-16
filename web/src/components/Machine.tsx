@@ -32,6 +32,25 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
   const stale = host.status !== 'ok';
   const [showDetail, setShowDetail] = useState(false);
 
+  /**
+   * Temperature at which these cards begin to slow down for heat.
+   *
+   * Empirically derived from this fleet: across 28k samples, the thermal
+   * slowdown bit first appears at 80°C and rises steeply above it. It is not a
+   * documented per-SKU figure -- nvidia-smi reports the target (85°C here) and
+   * T.Limit values as unexplained offsets -- so it is stated as what it is.
+   */
+  const THERMAL_THROTTLE_C = 80;
+
+  const temps = host.gpus.map((g) => g.temp_c).filter((t): t is number => t !== null);
+  const hottest = temps.length ? Math.max(...temps) : -Infinity;
+  const hasTemp = temps.length > 0;
+  // Cards that were thermally (or hardware) limited at any point in the recent
+  // window -- not cards at their power cap, which is normal at full load.
+  const thermalRecent = host.gpus.filter(
+    (g) => (g.thermal_recent_pct ?? 0) > 0 || g.throttle_reasons.some((r) => r.includes('热')),
+  ).length;
+
   const allocated = host.gpus.filter((g) => g.n_procs > 0).length;
   // A host that has never been polled reports nothing, which is NOT the same as
   // reporting zero. Rendering "0 / 0 占用" and a "显卡 0/8" mismatch badge would
@@ -280,7 +299,7 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
 
       <div style={{ padding: '12px 16px 4px' }}>
         <Row gutter={[28, 12]}>
-          <Col xs={24} sm={12} md={8}>
+          <Col xs={24} sm={12} md={6}>
             <Stat
               label="CPU"
               value={pct(host.cpu?.pct, 1)}
@@ -292,7 +311,7 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
               subTitle={`1/5/15 分钟平均负载:${num(host.cpu?.load1, 2)} / ${num(host.cpu?.load5, 2)} / ${num(host.cpu?.load15, 2)}`}
             />
           </Col>
-          <Col xs={24} sm={12} md={8}>
+          <Col xs={24} sm={12} md={6}>
             <Stat
               label="内存"
               value={`${gib(host.mem?.used_mib)} / ${gib(host.mem?.total_mib, 0)}`}
@@ -309,7 +328,7 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
               }
             />
           </Col>
-          <Col xs={24} sm={12} md={8}>
+          <Col xs={24} sm={12} md={6}>
             <Stat
               label="显卡"
               value={hasData ? `${allocated} / ${host.gpus.length} 占用` : '—'}
@@ -334,6 +353,39 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
                       .filter(Boolean)
                       .join(' · ') || '无人占用'
               }
+            />
+          </Col>
+          <Col xs={24} sm={12} md={6}>
+            <Stat
+              label="散热"
+              value={hasTemp ? `${Math.round(hottest)}°C` : '—'}
+              // The bar is the distance to the throttle point, not a percentage
+              // of some arbitrary maximum: 100% means "about to slow down".
+              percent={hasTemp ? Math.min((hottest / THERMAL_THROTTLE_C) * 100, 100) : null}
+              // Colour comes from FACTS, not from a made-up ramp: red only when a
+              // card is actually being throttled for heat, amber once the
+              // temperature reaches the point where that starts. Feeding °C
+              // through severity() would paint a perfectly healthy 56°C card
+              // amber.
+              color={
+                !hasTemp
+                  ? undefined
+                  : thermalRecent > 0
+                    ? colors.danger
+                    : hottest >= THERMAL_THROTTLE_C
+                      ? colors.warn
+                      : colors.accent
+              }
+              sub={
+                !hasTemp
+                  ? '—'
+                  : thermalRecent > 0
+                    ? `${thermalRecent} 张卡近期热降频`
+                    : hottest >= THERMAL_THROTTLE_C
+                      ? `已达降频温度 ${THERMAL_THROTTLE_C}°C`
+                      : `距降频 ${Math.round(THERMAL_THROTTLE_C - hottest)}°C`
+              }
+              subTitle={`所有卡里最高的一张。${THERMAL_THROTTLE_C}°C 是实测的降频起点(见 README:全机群 2.8 万个样本中,热降频最早出现在 80°C)。`}
             />
           </Col>
         </Row>
@@ -678,8 +730,27 @@ export function CardTelemetry({ gpu }: { gpu: Gpu }) {
       )}
       {cell('P-State', gpu.pstate ?? '—', 'P0=满性能,P2/P8=节能状态')}
       {cell(
-        '功耗上限',
-        gpu.power_limit_w === null ? '—' : `${Math.round(gpu.power_limit_w)} W`,
+        '功耗',
+        gpu.power_w === null || gpu.power_limit_w === null ? (
+          '—'
+        ) : (
+          // Shown against the limit, because "212 W" means nothing without it:
+          // 212 of 285 is a card with headroom, 212 of 220 is a card pinned at
+          // its cap.
+          <span
+            style={{
+              color:
+                gpu.power_w / gpu.power_limit_w >= 0.98 ? token.colorWarning : undefined,
+            }}
+          >
+            {Math.round(gpu.power_w)} / {Math.round(gpu.power_limit_w)} W
+            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+              {' '}
+              {Math.round((gpu.power_w / gpu.power_limit_w) * 100)}%
+            </Typography.Text>
+          </span>
+        ),
+        '当前功耗 / 该卡功耗上限。接近 100% 说明卡在功耗墙上,再快也快不了。',
       )}
       {cell(
         'PCIe',

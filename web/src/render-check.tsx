@@ -239,6 +239,18 @@ for (const label of ['SM 时钟', '显存带宽', '风扇', 'P-State', 'PCIe', '
   check(telemetryText.includes(label), `card telemetry is missing "${label}"`);
 }
 
+// The cooling meter is the at-a-glance answer to "which machine's cooling is
+// struggling", so it must be present on every card and must not be a percentage
+// of some invented maximum.
+// (The first version of this check read `countOf('散热') === 0 || include(...)`,
+// which short-circuited to always true -- `countOf` counts CLASSES, and there is
+// no `散热` class, so the assertion could never fail. Keep it to text.)
+check(html.includes('散热'), 'the machine card is missing its cooling meter');
+check(
+  html.includes('距降频') || html.includes('近期热降频') || html.includes('已达降频温度'),
+  'the cooling meter renders no headroom or throttle state',
+);
+
 // Every machine must offer its detail toggle, and the chart must NOT be in the
 // initial markup -- it is collapsed by default and fetched on demand, so a
 // chart appearing here would mean the lazy behaviour had been lost.
