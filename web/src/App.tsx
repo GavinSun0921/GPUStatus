@@ -157,8 +157,14 @@ function Shell({
               {snapshot?.site || 'GPUStatus'}
             </Typography.Text>
             {snapshot?.site && (
+              // A description, not "GPUStatus · GPU 集群监控". The product name
+              // already means "GPU status", so pairing it with "GPU cluster
+              // monitoring" said the same thing twice behind a separator that
+              // implied two different facts. The big text names the lab; this
+              // line says what the page is. The tool name still leads the
+              // browser tab.
               <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                GPUStatus · GPU 集群监控
+                GPU 集群监控
               </Typography.Text>
             )}
           </Space>
