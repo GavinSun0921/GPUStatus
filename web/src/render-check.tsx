@@ -111,6 +111,23 @@ const view = renderView(
   </>,
 );
 
+/**
+ * The inline colour applied to a table cell whose text is `needle`.
+ *
+ * Colours live in a style attribute, so they are invisible to every text- and
+ * markup-based check. This is the only way to catch a ramp wired up backwards.
+ */
+function cellColour(container: HTMLElement, needle: string): string {
+  for (const el of container.querySelectorAll<HTMLElement>('span, td')) {
+    if ((el.textContent ?? '').trim() !== needle) continue;
+    const own = el.style?.color;
+    if (own) return own;
+    const child = el.querySelector<HTMLElement>('[style*="color"]');
+    if (child) return child.style.color;
+  }
+  return '';
+}
+
 // --- assertions -------------------------------------------------------------
 const failures: string[] = [];
 const check = (condition: boolean, label: string) => {
@@ -444,7 +461,22 @@ const sharedCard = card(1, {
 const synthetic: Snapshot = {
   ...snapshot,
   summary: { ...snapshot.summary, hosts_total: 1, hosts_ok: 1, gpus_total: 4 },
-  users: [],
+  // Two users at opposite ends of the utilisation range. The whole point of
+  // this pair is the COLOURS, which no other check can see: they are inline
+  // styles, so the markup is byte-identical whichever ramp is used -- which is
+  // exactly how 97% came to be painted red on the live dashboard.
+  users: [
+    {
+      username: 'busy', gpu_count: 4, mem_mib: 40000, proc_count: 4,
+      sm_pct_avg: 96.5, sm_pct_sum: 386,
+      hosts: [{ id: 'synthetic', label: 'Synthetic', gpu_count: 4, gpus: [0, 1, 2, 3] }],
+    },
+    {
+      username: 'idle', gpu_count: 4, mem_mib: 40000, proc_count: 4,
+      sm_pct_avg: 2.5, sm_pct_sum: 10,
+      hosts: [{ id: 'synthetic', label: 'Synthetic', gpu_count: 4, gpus: [0, 1, 2, 3] }],
+    },
+  ],
   hosts: [
     {
       ...template,
@@ -513,7 +545,29 @@ const userProcView = renderView(
 );
 const userProcText = userProcView.textContent ?? '';
 
+// The users table, rendered from the synthetic snapshot so two users sit at
+// opposite ends of the utilisation range.
+const userView = renderView(<UsersView snapshot={synthetic} />);
+const busyColour = cellColour(userView, '96.5%');
+const idleColour = cellColour(userView, '2.5%');
+
 const edgeChecks: [boolean, string][] = [
+  // Colours are inline styles, so nothing else on this page can see them. The
+  // users table used to paint 97% red and 25% green -- backwards, because it
+  // went through the severity ramp, which answers "is this about to break?"
+  // rather than "is this allocation being used?".
+  [
+    !busyColour,
+    `a 96.5% allocation is coloured (${busyColour}) -- a busy GPU is the goal, not a fault`,
+  ],
+  [
+    Boolean(idleColour),
+    'a 2.5% allocation is not coloured -- holding GPUs without using them is the thing to flag',
+  ],
+  [
+    !idleColour || busyColour !== idleColour,
+    'the busy and idle rows share a colour, so the ramp is not distinguishing them',
+  ],
   [edgeText.includes('空闲'), 'idle card does not render as 空闲'],
   // The real requirement: NO process may be elided. The UI used to render only
   // the first process and summarise the rest as a count, so on a card shared by

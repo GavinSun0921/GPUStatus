@@ -105,3 +105,64 @@ test('the severity ramp is reserved for things that are actually wrong', () => {
     'disk usage no longer uses the severity ramp',
   );
 });
+
+// ------------------------------------------------- utilisation colouring ----
+//
+// The severity ramp answers "is this resource about to break?" and points the
+// only way that makes sense: high = red. Utilisation is the opposite question.
+// Feeding it through `severity` painted 97% red and 25% green on the users page,
+// i.e. it treated a busy GPU as the problem, when the problem on a shared
+// cluster is holding cards and not using them.
+//
+// The render check cannot see this class of bug: the colours are inline styles
+// on a <span>, so the markup is identical whichever ramp is used. So the
+// function is imported and its bands asserted directly.
+
+const eff = await import('../src/severity.ts');
+const COLOURS = { ok: 'ok', warn: 'WARN', danger: 'DANGER', accent: 'accent', muted: 'muted' };
+
+test('a busy allocation is never flagged', () => {
+  // These are the values the real cluster reports for its heaviest users, and
+  // every one of them used to render red.
+  for (const pct of [97.3, 93.1, 90.8, 89.8, 87.7, 62.3, 53]) {
+    assert.equal(
+      eff.efficiencyColor(pct, COLOURS),
+      undefined,
+      `${pct}% was coloured -- being busy is the desired state`,
+    );
+  }
+});
+
+test('an idle allocation is flagged, in proportion', () => {
+  // The real case: 7 GPUs held at 0%.
+  assert.equal(eff.efficiencyColor(0, COLOURS), 'DANGER');
+  assert.equal(eff.efficiencyColor(9.9, COLOURS), 'DANGER');
+  // 6 GPUs at 25% -- worth a look, not an alarm.
+  assert.equal(eff.efficiencyColor(25.3, COLOURS), 'WARN');
+  assert.equal(eff.efficiencyColor(29.9, COLOURS), 'WARN');
+  // The boundary itself is not flagged.
+  assert.equal(eff.efficiencyColor(30, COLOURS), undefined);
+});
+
+test('efficiency and severity point in opposite directions', () => {
+  // Stated as a property so the two cannot quietly converge again.
+  const severity = eff.severity(95);
+  assert.equal(severity, 'danger', 'severity no longer flags high values');
+  assert.equal(
+    eff.efficiencyColor(95, COLOURS),
+    undefined,
+    'a 95% allocation is being flagged as a problem',
+  );
+  assert.equal(
+    eff.efficiencyColor(2, COLOURS),
+    'DANGER',
+    'a 2% allocation is not being flagged',
+  );
+});
+
+test('an unknown utilisation is not a colour', () => {
+  // "No data" must not render as the reassuring end of the ramp.
+  assert.equal(eff.efficiencyColor(null, COLOURS), undefined);
+  assert.equal(eff.efficiencyColor(undefined, COLOURS), undefined);
+  assert.equal(eff.efficiencyColor(Number.NaN, COLOURS), undefined);
+});

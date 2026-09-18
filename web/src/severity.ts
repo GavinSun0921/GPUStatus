@@ -35,6 +35,36 @@ export function activityColor(value: number | null | undefined, colors: Record<S
   return value >= 5 ? colors.accent : colors.muted;
 }
 
+/**
+ * Colour for how well a user's ALLOCATED GPUs are being used.
+ *
+ * The severity ramp is the wrong shape here, and its direction is backwards: it
+ * paints 97% red and 25% green, i.e. it treats a busy GPU as the problem. On a
+ * shared cluster the problem is the opposite one -- holding cards and not using
+ * them keeps somebody else from running.
+ *
+ * So this ramp runs the other way, and only the wasteful end is coloured at all.
+ * High utilisation gets NO colour: "in use" is the normal, desired state, and
+ * colouring it would make the table shout on every healthy row.
+ *
+ * It is a separate helper rather than a reversed threshold inside `severity`,
+ * because the two answer different questions. `severity` asks "is this resource
+ * about to break?" (disk filling, memory exhausting) and must keep pointing the
+ * way it does.
+ *
+ * The bands are deliberately generous at the top: a memory-bound job can sit at
+ * 30-50% SM legitimately, so only clearly-idle allocations are flagged.
+ */
+export function efficiencyColor(
+  value: number | null | undefined,
+  colors: Record<Severity, string>,
+): string | undefined {
+  if (value === null || value === undefined || !Number.isFinite(value)) return undefined;
+  if (value < 10) return colors.danger;
+  if (value < 30) return colors.warn;
+  return undefined;
+}
+
 /** Resolve severity bands to the current antd theme's palette. */
 export function useSeverityColors(): Record<Severity, string> {
   const { token } = theme.useToken();

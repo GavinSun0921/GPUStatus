@@ -5,7 +5,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useJson } from '../api';
 import type { EventRow, HostUserProc, Snapshot, UsageTotalsRow } from '../types';
 import { clock, duration, gib } from '../format';
-import { useSeverityColors, severity } from '../severity';
+import { activityColor, efficiencyColor, useSeverityColors } from '../severity';
 
 const RANGES = [
   { label: '24 小时', value: '-24h' },
@@ -242,8 +242,16 @@ export function UsersView({ snapshot }: { snapshot: Snapshot }) {
       align: 'right',
       width: 110,
       sorter: (a, b) => (a.sm_pct_avg ?? 0) - (b.sm_pct_avg ?? 0),
+      // Low is the problem here, not high: this column says how well the GPUs
+      // this user is HOLDING are being used, and a low figure is wasted shared
+      // capacity. It used to go through `severity`, which painted 97% red and
+      // 25% green -- exactly backwards.
       render: (v: number | null) =>
-        v === null ? '—' : <Typography.Text style={{ color: colors[severity(v)] }}>{v}%</Typography.Text>,
+        v === null ? (
+          '—'
+        ) : (
+          <Typography.Text style={{ color: efficiencyColor(v, colors) }}>{v}%</Typography.Text>
+        ),
     },
     { title: '进程', dataIndex: 'proc_count', align: 'right', width: 80 },
     {
@@ -366,8 +374,18 @@ export function UserProcTable({ rows }: { rows: UserProcRow[] }) {
                     dataIndex: 'sm_pct',
                     align: 'right',
                     width: 110,
+                    // Neutral, matching the machine page's process table: this
+                    // is the same reading, and a process at 95% is doing its job.
+                    // The two tables previously disagreed -- the machine page
+                    // showed it blue while this one showed the same number red.
                     render: (v: number | null) =>
-                      v === null ? '—' : <Typography.Text style={{ color: colors[severity(v)] }}>{Math.round(v)}%</Typography.Text>,
+                      v === null ? (
+                        '—'
+                      ) : (
+                        <Typography.Text style={{ color: activityColor(v, colors) }}>
+                          {Math.round(v)}%
+                        </Typography.Text>
+                      ),
                   },
       ]}
     />
