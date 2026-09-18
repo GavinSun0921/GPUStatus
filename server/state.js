@@ -78,6 +78,32 @@ export function decodeThrottle(mask, { idle = false } = {}) {
 }
 
 /**
+ * Fold a user's recent samples into the pair the views report.
+ *
+ * Falls back to the current sample when there is no history yet (a user who
+ * appeared since the last poll), so a brand-new job still shows a figure rather
+ * than a dash.
+ */
+function windowedSm(ring, fallbackSum, fallbackGpus) {
+  let sum = fallbackSum;
+  let gpus = fallbackGpus;
+  if (ring && ring.length > 0) {
+    sum = 0;
+    gpus = 0;
+    for (const r of ring) {
+      sum += r.sum;
+      gpus += r.gpus;
+    }
+  }
+  return {
+    sm_pct_avg: gpus > 0 ? Number((sum / gpus).toFixed(1)) : null,
+    /** How many card-samples the average is over; 0 when nothing reported. */
+    sm_counted_gpus: gpus,
+    sm_pct_sum: Number(sum.toFixed(1)),
+  };
+}
+
+/**
  * Percentage of the recent window a card spent in thermal slowdown.
  *
  * Null (not 0) when there is no history yet: "no data" and "never throttled"
@@ -192,6 +218,23 @@ const THERMAL_MIN_SAMPLES = 20;
  * learn to ignore.
  */
 const GPU_COUNT_MEMORY_MS = 2 * 3600_000;
+
+/**
+ * How far back a user's utilisation average reaches.
+ *
+ * `utilization.gpu` and pmon's per-process `sm` are INSTANTANEOUS samples taken
+ * once per poll interval. For a workload that runs in bursts -- the normal shape
+ * when a model does not fit in GPU memory and the framework alternates between
+ * computing and moving weights -- a single sample lands in a gap about half the
+ * time. Measured on Server13, one such job read 0% in 6 of 12 consecutive
+ * four-second samples while its clock stayed pinned at 1695-1980 MHz and it drew
+ * 118-277W: it was working, and one instant said otherwise.
+ *
+ * Averaging a few minutes of samples is what makes the figure mean what the
+ * column claims. It is a real average over time, not an average of one instant
+ * across several cards.
+ */
+const USER_SM_WINDOW_MS = 5 * 60_000;
 
 /**
  * `expect_gpus` from the config still wins when it is set: that is an explicit
@@ -376,6 +419,21 @@ export class State {
         entry.lastGpuCount = seenCount;
       }
 
+      // Per-user utilisation history, so the users page can report a real
+      // average over time instead of one instantaneous sample. See
+      // USER_SM_WINDOW_MS.
+      entry.userSm = entry.userSm ?? new Map();
+      for (const u of aggregateUserUsage(result.sample.procs ?? [])) {
+        // A sample with no readable utilisation contributes nothing; appending
+        // it as a zero would reintroduce the bug this window exists to fix.
+        if (u.smGpus === 0) continue;
+        const ring = entry.userSm.get(u.username) ?? [];
+        ring.push({ ts: result.sample.ts, sum: u.smSum, gpus: u.smGpus });
+        const smCutoff = result.sample.ts - USER_SM_WINDOW_MS;
+        while (ring.length > 0 && ring[0].ts < smCutoff) ring.shift();
+        entry.userSm.set(u.username, ring);
+      }
+
       entry.thermal = entry.thermal ?? new Map();
       for (const gpu of result.sample.gpus ?? []) {
         const mask = gpu.throttleMask;
@@ -531,17 +589,16 @@ export class State {
           gpus: gpuSet,
           mem_mib: Math.round(u.memSum),
           proc_count: u.procCount,
-          // Utilisation averaged over the cards this user occupies, which is the
-          // number that answers "is this person actually using their allocation".
+          // Utilisation averaged over BOTH the cards this user occupies and the
+          // last few minutes of samples.
           //
-          // Divided by smGpus (the cards that REPORTED), not by gpus (the cards
-          // held). An unreadable reading contributes 0 to the sum, so dividing by
-          // every card pulled the average toward zero and could report a busy
-          // user as 0% -- which then rendered red as a "wasted allocation".
-          sm_pct_avg: u.smGpus > 0 ? Number((u.smSum / u.smGpus).toFixed(1)) : null,
-          /** How many cards the average is over; 0 when nothing reported. */
-          sm_counted_gpus: u.smGpus,
-          sm_pct_sum: Number(u.smSum.toFixed(1)),
+          // Two corrections are folded in here, and both matter:
+          //   - divided by smGpus (cards that reported), not by every card held,
+          //     because an unreadable reading contributes nothing to the sum;
+          //   - summed over a time window, not one instant, because a bursty
+          //     workload is 0% in roughly half of individual samples.
+          // Getting either wrong reported a working job as an idle allocation.
+          ...windowedSm(entry.userSm?.get(u.username), u.smSum, u.smGpus),
           procs: procs.map((p) => ({
             pid: p.pid,
             name: p.name,

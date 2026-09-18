@@ -1441,3 +1441,75 @@ test('pmon columns are found by name, not by position', () => {
     'a hard-coded pmon field count is back; that is what broke the 535 driver',
   );
 });
+
+test('a bursty job is not reported as idle', () => {
+  // Server13, measured directly: one card read 78, 0, 0, 0, 11, 73, 0, 100, 0,
+  // 19, 0, 75 percent in twelve consecutive four-second samples, while its clock
+  // stayed at 1695-1980 MHz and it drew 118-277W. The job was working; the
+  // individual samples were just landing in the gaps between bursts, which is
+  // the normal shape when a model does not fit in GPU memory.
+  //
+  // The users page averaged ONE instant across a user's cards, so which figure
+  // it showed came down to when the poll happened to fire.
+  const cfg = {
+    site: null,
+    poll: { intervalMs: 15000, timeoutMs: 12000, staleAfterMs: 45000, downAfterFailures: 10 },
+    naming: { stripDomain: true },
+    hosts: [{ id: 'h1', ssh: 'h1', expectGpus: null, disks: null, netMounts: [] }],
+  };
+  const state = new State(cfg);
+  const pattern = [78, 0, 0, 0, 11, 73, 0, 100, 0, 19, 0, 75];
+  const base = Date.now() - pattern.length * 15000;
+
+  pattern.forEach((sm, i) => {
+    state.applyResult('h1', {
+      ok: true,
+      durationMs: 100,
+      sample: {
+        ts: base + i * 15000,
+        hostname: 'h1',
+        label: 'H1',
+        uptimeS: 1,
+        driverVersion: 'x',
+        warnings: [],
+        host: { cpuPct: 10, memPct: 20, ncpu: 8, load1: 1, load5: 1, load15: 1, totalProcs: 100, swapUsedMib: 0, swapTotalMib: 0, iowaitPct: 1 },
+        gpus: [{ index: 0, util: sm, memUtil: 0, memUsedMib: 22000, memTotalMib: 24000, tempC: 55, powerW: 150, nProcs: 1, throttleMask: 0 }],
+        procs: [{ pid: 1, username: 'wangsiyuan', gpuIndex: 0, smPct: sm, usedMemMib: 22000, name: 'python', elapsedS: 100 }],
+      },
+    });
+  });
+
+  const [user] = state.buildSnapshot().hosts[0].users;
+  const truth = pattern.reduce((a, b) => a + b, 0) / pattern.length;
+  assert.equal(user.sm_counted_gpus, pattern.length, 'not every sample reached the average');
+  assert.ok(
+    Math.abs(user.sm_pct_avg - truth) < 0.15,
+    `expected the time average ${truth.toFixed(1)}%, got ${user.sm_pct_avg}%`,
+  );
+  // The point of the window: the figure must not be whatever the last sample
+  // happened to catch. The final sample was 75%, the average is ~29.7%.
+  assert.ok(
+    user.sm_pct_avg < 40,
+    'the reported average looks like a single sample rather than an average over time',
+  );
+
+  // Samples with no readable utilisation must not enter the window as zeros --
+  // that is the bug the window was built to fix.
+  state.applyResult('h1', {
+    ok: true,
+    durationMs: 100,
+    sample: {
+      ts: base + pattern.length * 15000,
+      hostname: 'h1', label: 'H1', uptimeS: 1, driverVersion: 'x', warnings: [],
+      host: { cpuPct: 10, memPct: 20, ncpu: 8, load1: 1, load5: 1, load15: 1, totalProcs: 100, swapUsedMib: 0, swapTotalMib: 0, iowaitPct: 1 },
+      gpus: [{ index: 0, util: 0, memUtil: 0, memUsedMib: 22000, memTotalMib: 24000, tempC: 55, powerW: 150, nProcs: 1, throttleMask: 0 }],
+      procs: [{ pid: 1, username: 'wangsiyuan', gpuIndex: 0, smPct: null, usedMemMib: 22000, name: 'python', elapsedS: 100 }],
+    },
+  });
+  const [after] = state.buildSnapshot().hosts[0].users;
+  assert.equal(
+    after.sm_counted_gpus,
+    pattern.length,
+    'an unreadable sample was counted as a 0% reading',
+  );
+});
