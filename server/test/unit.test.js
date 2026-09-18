@@ -1513,3 +1513,92 @@ test('a bursty job is not reported as idle', () => {
     'an unreadable sample was counted as a 0% reading',
   );
 });
+
+test('hours whose process readings were lost are rebuilt from card data', () => {
+  // The pmon parser dropped every line from the driver-535 machines, storing
+  // per-process utilisation as null. That null became a 0 in the rollup, so the
+  // "effective GPU hours" used for accounting read as ~0: wangsiyuan's 130
+  // card-hours on gpu06 recorded 1.8, and maoyuxin's 54 on gpu09 recorded 0.
+  //
+  // The per-process figure is gone, but the CARD-level utilisation comes from a
+  // different nvidia-smi query and survived. On both machines exactly one user
+  // held each card, so the card's utilisation IS that user's.
+  const dir = mkdtempSync(join(tmpdir(), 'gpus-sm-'));
+  const path = join(dir, 'x.db');
+
+  // Open once so the schema exists; the repair is a no-op on an empty database.
+  new Db(path).close();
+
+  const db = new Db(path);
+  const hour = 1_700_000_000_000 - (1_700_000_000_000 % 3600000);
+  const insProc = db.db.prepare(
+    'INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct) VALUES (?,?,?,?,?,?,?,?,?)',
+  );
+  const insGpu = db.db.prepare(
+    `INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
+       mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
+       throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate, bus_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+
+  // Two cards, two instants: card 0 at 80%, card 1 at 40%.
+  for (const ts of [hour + 60_000, hour + 120_000]) {
+    for (const [idx, util] of [[0, 80], [1, 40]]) {
+      insGpu.run(ts, 'gpu06', idx, `u${idx}`, 'X', util, 100, 1000, 0, 50, 100, 30, 1, 0, 1000, 2000, 300, 'P2', '00:00.0');
+      // sm_pct deliberately null: this is the lost reading.
+      insProc.run(ts, 'gpu06', idx, `u${idx}`, 100 + idx, 'alice', 'python', 100, null);
+    }
+  }
+  // What the broken writer stored: two cards held, zero effective GPU-seconds.
+  db.db
+    .prepare(
+      `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+         sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(hour, 'gpu06', 'alice', 2 * 60, 0, 0, 2, 0, 2);
+
+  // Clear the once-only marker so opening the file runs the repair again.
+  db.setMeta('repair_pmon_sm_v1', '');
+  db.close();
+
+  const repaired = new Db(path);
+  assert.equal(repaired.repairedSmRows, 1, 'the lost hour was not repaired');
+
+  const row = repaired.db
+    .prepare('SELECT gpu_seconds, sm_gpu_seconds FROM usage_rollup WHERE username = ?')
+    .get('alice');
+  // The two cards averaged (80 + 40) / 2 = 60%, so 120 card-seconds becomes 72
+  // effective GPU-seconds -- and gpu_seconds, which never depended on sm, is
+  // left exactly as it was.
+  assert.equal(row.gpu_seconds, 120, 'the card-time was altered');
+  assert.ok(
+    Math.abs(row.sm_gpu_seconds - 72) < 0.01,
+    `expected 72 effective seconds, got ${row.sm_gpu_seconds}`,
+  );
+  repaired.close();
+});
+
+test('an hour that genuinely read 0% is not mistaken for a lost one', () => {
+  // The distinction the repair turns on: a real idle process reports 0, which is
+  // a measurement; only null means "we never got a reading". Repairing an hour
+  // that legitimately read zero would invent usage that never happened.
+  const db = new Db(':memory:');
+  const hour = 1_700_000_000_000 - (1_700_000_000_000 % 3600000);
+  db.db
+    .prepare(
+      'INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct) VALUES (?,?,?,?,?,?,?,?,?)',
+    )
+    .run(hour + 1000, 'gpu06', 0, 'u0', 1, 'bob', 'python', 100, 0);
+  const count = db.db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT host_id, CAST(ts / 3600000 AS INTEGER) * 3600000 AS bucket
+           FROM proc_sample WHERE username IS NOT NULL
+          GROUP BY host_id, bucket
+         HAVING SUM(CASE WHEN sm_pct IS NOT NULL THEN 1 ELSE 0 END) = 0)`,
+    )
+    .get().n;
+  assert.equal(count, 0, 'an hour with a genuine 0% reading was flagged as lost');
+  db.close();
+});

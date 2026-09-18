@@ -160,6 +160,7 @@ export class Db {
     this.#migrateIndexes();
     this.repairedUsernames = this.#repairTruncatedUsernames();
     this.#backfillUsagePeak();
+    this.#repairLostProcessSm();
     this.#backfillHostHourly();
     this.#prepare();
     this.prevTs = this.#loadPrevTimestamps();
@@ -485,6 +486,112 @@ export class Db {
       ON CONFLICT(bucket_ts, username) DO UPDATE SET
         peak_gpus = MAX(peak_gpus, excluded.peak_gpus)
     `);
+  }
+
+  /**
+   * Rebuild `sm_gpu_seconds` for hours where the process-level reading was lost.
+   *
+   * nvidia-smi pmon lists its columns differently by driver: 535 emits 8
+   * ("gpu pid type sm mem enc dec command"), 580 emits 10 (adding jpg and ofa).
+   * The probe required at least 9 fields, so EVERY line from the 535 machines
+   * was discarded and their per-process utilisation stored as null. That null
+   * became a 0 in the rollup, so `sm_gpu_seconds` -- the "effective GPU hours"
+   * used for accounting -- read as ~0 for two users across 54 hours:
+   *
+   *     gpu06  wangsiyuan  130.2 card-hours -> 1.78 effective
+   *     gpu09  maoyuxin     53.6 card-hours -> 0
+   *
+   * The per-process figure cannot be recovered, but it does not have to be: the
+   * CARD-level utilisation comes from a different nvidia-smi query and was never
+   * affected. On both machines exactly one user held each card during those
+   * hours (verified: zero samples with two users on one card), so the card's
+   * utilisation IS that user's utilisation.
+   *
+   * What is written is therefore a measurement at card granularity, not a guess.
+   * That is why this is preferred over deleting the rows, which would also
+   * discard the correct `gpu_seconds` and `mem_mib_seconds` alongside it.
+   */
+  #repairLostProcessSm() {
+    if (this.getMeta('repair_pmon_sm_v1')) return;
+
+    // Lost HOURS, not lost machines. The parser was fixed while the cluster was
+    // running, so a machine can have correct readings for its most recent hours
+    // and nothing but nulls before that -- keying on the machine would skip
+    // exactly the rows that need repairing.
+    //
+    // An hour counts as lost when it has process rows (so somebody was on the
+    // machine) and NOT ONE of them carries a utilisation. That is the signature
+    // of the parser dropping every line, and it cannot be produced by a genuine
+    // reading: a real idle process reports 0, which is not null.
+    // Set BEFORE the detection query: it groups 250k+ rows, and SQLite spills to
+    // a temp file it cannot always create here ("unable to open database file").
+    this.db.exec('PRAGMA temp_store = MEMORY');
+
+    const lostHours = this.db
+      .prepare(
+        `SELECT host_id, CAST(ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} AS bucket
+           FROM proc_sample
+          WHERE username IS NOT NULL
+          GROUP BY host_id, bucket
+         HAVING SUM(CASE WHEN sm_pct IS NOT NULL THEN 1 ELSE 0 END) = 0`,
+      )
+      .all();
+
+    if (lostHours.length > 0) {
+      const lost = [...new Set(lostHours.map((r) => r.host_id))];
+      const placeholders = lost.map(() => '?').join(',');
+      // Card-samples the user held, joined to the CARD's utilisation at the same
+      // instant. Grouped per hour so the result can be merged into the rollup.
+      const rows = this.db
+        .prepare(
+          `SELECT bucket, host_id, username,
+                  SUM(cards)    AS card_samples,
+                  SUM(util_sum) AS util_card_samples
+             FROM (
+               SELECT CAST(h.ts / ${HOUR_MS} AS INTEGER) * ${HOUR_MS} AS bucket,
+                      h.host_id, h.username,
+                      COUNT(*) AS cards,
+                      SUM(g.util_pct) AS util_sum
+                 FROM (SELECT DISTINCT ts, host_id, gpu_index, username
+                         FROM proc_sample
+                        WHERE username IS NOT NULL
+                          AND host_id IN (${placeholders})) h
+                 JOIN gpu_sample g
+                   ON g.host_id = h.host_id AND g.ts = h.ts AND g.gpu_index = h.gpu_index
+                WHERE g.util_pct IS NOT NULL
+                GROUP BY h.ts, h.host_id, h.username
+             )
+            GROUP BY bucket, host_id, username`,
+        )
+        .all(...lost);
+
+      const apply = this.db.prepare(
+        `UPDATE usage_rollup
+            SET sm_gpu_seconds = gpu_seconds * ? / 100.0
+          WHERE bucket_ts = ? AND host_id = ? AND username = ?`,
+      );
+
+      this.db.exec('BEGIN');
+      try {
+        const lostSet = new Set(lostHours.map((r) => `${r.host_id}@${r.bucket}`));
+        let repaired = 0;
+        for (const r of rows) {
+          if (!lostSet.has(`${r.host_id}@${r.bucket}`)) continue;
+          if (!r.card_samples || r.util_card_samples === null) continue;
+          // The ratio is a card-weighted average utilisation, so multiplying the
+          // already-correct gpu_seconds by it needs no dt of its own.
+          apply.run(r.util_card_samples / r.card_samples, r.bucket, r.host_id, r.username);
+          repaired += 1;
+        }
+        this.repairedSmRows = repaired;
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+    }
+
+    this.setMeta('repair_pmon_sm_v1', String(Date.now()));
   }
 
   #migrate() {
