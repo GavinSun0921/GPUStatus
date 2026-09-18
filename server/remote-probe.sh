@@ -573,18 +573,54 @@ section == "PIDUSER" {
 # ---- nvidia-smi pmon -------------------------------------------------------
 # "gpu pid type sm mem enc dec jpg ofa command", where the utilisation columns
 # are "-" for graphics (non-compute) clients.
+# Columns are located by NAME from the "# gpu pid type sm ..." header, never by
+# position. The set of columns depends on the driver:
+#
+#   535.183.01   gpu pid type sm mem enc dec command              (8 fields)
+#   580/610      gpu pid type sm mem enc dec jpg ofa command      (10 fields)
+#
+# This used to be `if (n < 9) next`, which silently discarded EVERY line from the
+# older machines -- so their per-process utilisation read as null while the cards
+# themselves reported 80%+. The guard now comes from the header, so a driver that
+# adds or removes a column cannot break it again.
 section == "PMON" {
   line = trim($0)
-  if (line == "" || substr(line, 1, 1) == "#") next
+  if (line == "") next
+
+  if (substr(line, 1, 1) == "#") {
+    # The header carries a leading "#" that the data rows do not, so it must be
+    # stripped BEFORE splitting -- otherwise every index is off by one and the
+    # pid column is read as the gpu index. (The second header line, "# Idx #
+    # C/G % ...", matches none of the names below and leaves the map alone.)
+    sub(/^#[ \t]*/, "", line)
+    n = split(line, f, /[ \t]+/)
+    for (i = 1; i <= n; i++) {
+      if (f[i] == "gpu") pcol_gpu = i
+      else if (f[i] == "pid") pcol_pid = i
+      else if (f[i] == "type") pcol_type = i
+      else if (f[i] == "sm") pcol_sm = i
+      else if (f[i] == "mem") pcol_mem = i
+      # "command" is last and may contain spaces, so it is re-joined from here.
+      else if (f[i] == "command") pcol_cmd = i
+    }
+    next
+  }
+
   n = split(line, f, /[ \t]+/)
-  if (n < 9) next
+
+  # No header yet (or a driver that renamed the columns): emit nothing rather
+  # than guess at positions, which is how the wrong column gets reported as sm.
+  if (pcol_sm == 0 || n < pcol_sm) next
+
   k = ++npmon
-  pmon_gpu[k]  = num(f[1])
-  pmon_pid[k]  = num(f[2])
-  pmon_type[k] = trim(f[3])
-  pmon_sm[k]   = num(f[4])
-  pmon_mem[k]  = num(f[5])
-  pmon_cmd[k]  = (n >= 10) ? trim(join(f, 10, n)) : ""
+  pmon_gpu[k]  = num(f[pcol_gpu])
+  pmon_pid[k]  = num(f[pcol_pid])
+  pmon_type[k] = trim(f[pcol_type])
+  # "-" means "not applicable for this client type" and becomes null, which is
+  # the honest answer -- it is not 0% utilisation.
+  pmon_sm[k]   = num(f[pcol_sm])
+  pmon_mem[k]  = (pcol_mem && n >= pcol_mem) ? num(f[pcol_mem]) : "null"
+  pmon_cmd[k]  = (pcol_cmd && n >= pcol_cmd) ? trim(join(f, pcol_cmd, n)) : ""
   next
 }
 

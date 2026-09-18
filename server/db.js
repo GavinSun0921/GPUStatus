@@ -99,14 +99,18 @@ export function aggregateUserUsage(procs) {
 
     let u = byUser.get(username);
     if (!u) {
-      u = { gpus: new Set(), smByGpu: new Map(), memSum: 0, procCount: 0 };
+      u = { gpus: new Set(), smByGpu: new Map(), smGpus: new Set(), memSum: 0, procCount: 0 };
       byUser.set(username, u);
     }
     if (Number.isInteger(p.gpuIndex)) u.gpus.add(p.gpuIndex);
 
-    const sm = Number.isFinite(p.smPct) ? Math.max(0, p.smPct) : 0;
     const key = Number.isInteger(p.gpuIndex) ? p.gpuIndex : -1;
-    u.smByGpu.set(key, (u.smByGpu.get(key) ?? 0) + sm);
+    if (Number.isFinite(p.smPct)) {
+      u.smByGpu.set(key, (u.smByGpu.get(key) ?? 0) + Math.max(0, p.smPct));
+      // Track which cards actually REPORTED a utilisation, so the average is
+      // divided by those and not by every card the user holds.
+      u.smGpus.add(key);
+    }
 
     u.memSum += Number.isFinite(p.usedMemMib) ? Math.max(0, p.usedMemMib) : 0;
     u.procCount += 1;
@@ -120,6 +124,16 @@ export function aggregateUserUsage(procs) {
       username,
       gpus: u.gpus.size,
       smSum,
+      /**
+       * How many cards the sum above is actually an average over.
+       *
+       * NOT `gpus.size`. A card whose per-process utilisation could not be read
+       * contributes 0 to the sum, so dividing by every held card silently drags
+       * the average toward zero -- a user with 7 cards reported as 41.7% when
+       * four of them were running at 75-80%. `sm_pct_avg` is null when nothing
+       * reported, because "we could not measure it" is not 0%.
+       */
+      smGpus: u.smGpus.size,
       memSum: u.memSum,
       procCount: u.procCount,
     });

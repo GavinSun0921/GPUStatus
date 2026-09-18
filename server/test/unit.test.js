@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deriveHostLabel, loadConfig, parseJsonc, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { Db, aggregateUserUsage } from '../db.js';
@@ -1368,4 +1369,75 @@ test('totals report the simultaneous peak, not the per-machine maximum', () => {
   assert.equal(row.peak_gpus, 12, 'the totals query fell back to the per-machine maximum');
   assert.equal(row.gpu_seconds, 720, 'the GPU-seconds total changed');
   db.close();
+});
+
+test('an unreadable utilisation does not drag the average toward zero', () => {
+  // Real case, wangsiyuan on Server06: the cards were at 84/79/83% while
+  // nvidia-smi pmon reported nothing for the process, so sm_pct was null.
+  // Summing null as 0 but dividing by every card held turned 292/4 = 73% into
+  // 292/7 = 41.7%, and when ALL readings were missing it produced 0.0% -- which
+  // the users page then painted red as a "wasted allocation".
+  const procs = [
+    { username: 'w', gpuIndex: 0, smPct: 80, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 1, smPct: 75, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 2, smPct: null, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 3, smPct: null, usedMemMib: 100 },
+  ];
+  const [u] = aggregateUserUsage(procs);
+  assert.equal(u.gpus, 4, 'the user still holds four cards');
+  assert.equal(u.smGpus, 2, 'the divisor counted cards that never reported');
+  assert.equal(u.smSum, 155);
+
+  // All readings missing: the average must be absent, not zero.
+  const [none] = aggregateUserUsage([
+    { username: 'w', gpuIndex: 0, smPct: null, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 1, smPct: null, usedMemMib: 100 },
+  ]);
+  assert.equal(none.smGpus, 0);
+  assert.equal(none.smSum, 0);
+  // (state.js maps smGpus === 0 to a null average, which the UI shows as "—".)
+
+  // A real zero still counts: an idle process IS a measurement of 0%.
+  const [idle] = aggregateUserUsage([
+    { username: 'w', gpuIndex: 0, smPct: 0, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 1, smPct: null, usedMemMib: 100 },
+  ]);
+  assert.equal(idle.smGpus, 1, 'a measured 0% was discarded as if unmeasured');
+  assert.equal(idle.smSum, 0);
+
+  // Two processes sharing one card must not be counted as two cards.
+  const [shared] = aggregateUserUsage([
+    { username: 'w', gpuIndex: 0, smPct: 60, usedMemMib: 100 },
+    { username: 'w', gpuIndex: 0, smPct: 60, usedMemMib: 100 },
+  ]);
+  assert.equal(shared.smGpus, 1, 'one card counted twice in the divisor');
+  assert.equal(shared.smSum, 100, 'per-card utilisation is capped at 100');
+});
+
+test('pmon columns are found by name, not by position', () => {
+  // The parser used to require at least 9 whitespace-separated fields. Driver
+  // 535 emits 8 ("gpu pid type sm mem enc dec command") and 580 emits 10 (with
+  // jpg and ofa), so every line from the older machines was discarded and their
+  // per-process utilisation read as null while the cards reported 80%+.
+  //
+  // This asserts the probe derives the columns from the header, which is the
+  // part that makes it survive a driver adding or removing a column.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const probe = readFileSync(join(here, '..', 'remote-probe.sh'), 'utf8');
+  // Comments are stripped first: the parser's own explanation quotes the old
+  // guard verbatim, and matching that would fail the very fix it documents.
+  const code = probe
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('#'))
+    .join('\n');
+
+  assert.ok(/f\[i\] == "sm"/.test(code), 'the pmon parser no longer locates the sm column by name');
+  assert.ok(
+    /sub\(\/\^#\[ \\t\]\*\/, "", line\)/.test(code),
+    'the pmon header is not having its leading # stripped, so every column index is off by one',
+  );
+  assert.ok(
+    !/if \(n < 9\) next/.test(code),
+    'a hard-coded pmon field count is back; that is what broke the 535 driver',
+  );
 });

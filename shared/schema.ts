@@ -124,7 +124,17 @@ export const HostUserSchema = z.object({
   gpus: z.array(z.number()),
   mem_mib: z.number(),
   proc_count: z.number(),
+  /**
+   * Average utilisation over the cards that REPORTED one.
+   *
+   * Null -- not 0 -- when nothing could be measured. The divisor is
+   * `sm_counted_gpus`, not `gpu_count`: a card whose per-process utilisation is
+   * unreadable contributes nothing to the sum, so dividing by every card held
+   * drags the average toward zero.
+   */
   sm_pct_avg: num,
+  /** How many cards the average is over; 0 when nothing reported. */
+  sm_counted_gpus: z.number(),
   sm_pct_sum: z.number(),
   procs: z.array(HostUserProcSchema),
 });

@@ -533,7 +533,14 @@ export class State {
           proc_count: u.procCount,
           // Utilisation averaged over the cards this user occupies, which is the
           // number that answers "is this person actually using their allocation".
-          sm_pct_avg: u.gpus > 0 ? Number((u.smSum / u.gpus).toFixed(1)) : null,
+          //
+          // Divided by smGpus (the cards that REPORTED), not by gpus (the cards
+          // held). An unreadable reading contributes 0 to the sum, so dividing by
+          // every card pulled the average toward zero and could report a busy
+          // user as 0% -- which then rendered red as a "wasted allocation".
+          sm_pct_avg: u.smGpus > 0 ? Number((u.smSum / u.smGpus).toFixed(1)) : null,
+          /** How many cards the average is over; 0 when nothing reported. */
+          sm_counted_gpus: u.smGpus,
           sm_pct_sum: Number(u.smSum.toFixed(1)),
           procs: procs.map((p) => ({
             pid: p.pid,
@@ -733,6 +740,7 @@ export class State {
             mem_mib: 0,
             proc_count: 0,
             sm_pct_sum: 0,
+            sm_gpu_count: 0,
             hosts: [],
           };
           byUser.set(u.username, agg);
@@ -741,6 +749,10 @@ export class State {
         agg.mem_mib += u.mem_mib;
         agg.proc_count += u.proc_count;
         agg.sm_pct_sum += u.sm_pct_sum;
+        // Only the machines that actually reported a utilisation contribute to
+        // the divisor -- see aggregateUserUsage. Summing cards held while
+        // summing only measured values is what turned a busy user into 0%.
+        agg.sm_gpu_count += u.sm_pct_avg === null ? 0 : u.sm_counted_gpus;
         agg.hosts.push({ id: host.id, label: host.label, gpu_count: u.gpu_count, gpus: u.gpus });
       }
     }
@@ -749,7 +761,8 @@ export class State {
         ...u,
         mem_mib: Math.round(u.mem_mib),
         sm_pct_sum: Number(u.sm_pct_sum.toFixed(1)),
-        sm_pct_avg: u.gpu_count > 0 ? Number((u.sm_pct_sum / u.gpu_count).toFixed(1)) : null,
+        sm_pct_avg:
+          u.sm_gpu_count > 0 ? Number((u.sm_pct_sum / u.sm_gpu_count).toFixed(1)) : null,
       }))
       .sort((a, b) => b.gpu_count - a.gpu_count || b.mem_mib - a.mem_mib);
 
