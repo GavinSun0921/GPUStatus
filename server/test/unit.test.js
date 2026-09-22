@@ -996,6 +996,22 @@ test('occupancy cost prices held card-hours, and never charges an unlisted model
   const unpriced = occupancyCost(3600, 0, 'NVIDIA H100', priceOfName);
   assert.equal(unpriced.cost_yuan, null);
   assert.equal(unpriced.unpriced_gpu_hours, 1);
+
+  // Sub-fen durations must keep their value through the full-precision path;
+  // a premature toFixed(2) here would turn 10s on a 0.5 rate into 0.
+  const blink = occupancyCost(10, 0, 'NVIDIA GeForce RTX 3090', priceOfName);
+  assert.ok(blink.cost_yuan > 0 && blink.cost_yuan < 0.01, `tiny cost collapsed to ${blink.cost_yuan}`);
+});
+
+test('occupancy cost treats a missing integral as unknown, never as 0 yuan', () => {
+  const rates = { 'NVIDIA GeForce RTX 3090': 1.2 };
+  const priceOfName = (n) => priceOfGpuName(n, rates);
+  const missing = occupancyCost(null, null, 'NVIDIA GeForce RTX 3090', priceOfName);
+  assert.equal(missing.cost_yuan, null);
+  assert.equal(missing.unpriced_gpu_hours, 0);
+  // A real zero is zero -- only NULL is "we do not know".
+  const idle = occupancyCost(0, 0, 'NVIDIA GeForce RTX 3090', priceOfName);
+  assert.equal(idle.cost_yuan, 0);
 });
 
 test('a rate change restates the whole cost history; old prices are discarded', () => {

@@ -39,8 +39,20 @@ export function loadHostGpuNames(db) {
  * 0 -- its hours are reported as `unpriced_gpu_hours` so the gap is visible.
  */
 export function occupancyCost(gpuSeconds, smGpuSeconds, rawName, priceOfName) {
-  const gpuHours = (gpuSeconds ?? 0) / 3600;
-  const effectiveHours = (smGpuSeconds ?? 0) / 3600;
+  // Measurement invariant: a missing integral is NOT zero occupancy. Only a
+  // real 0 means "held no card-time"; null means we do not know, so cost stays
+  // null rather than silently charging 0 yuan.
+  if (gpuSeconds == null) {
+    return {
+      cost_yuan: null,
+      effective_cost_yuan: null,
+      unpriced_gpu_hours: 0,
+      gpu_model: rawName ?? null,
+      gpu_price: rawName ? priceOfName(rawName) : null,
+    };
+  }
+  const gpuHours = gpuSeconds / 3600;
+  const effectiveHours = smGpuSeconds == null ? null : smGpuSeconds / 3600;
   const price = rawName ? priceOfName(rawName) : null;
   if (price == null) {
     return {
@@ -51,9 +63,11 @@ export function occupancyCost(gpuSeconds, smGpuSeconds, rawName, priceOfName) {
       gpu_price: null,
     };
   }
+  // Full precision here; callers that sum across hosts must not inherit a
+  // premature 2-decimal rounding before the final total.
   return {
-    cost_yuan: Number((gpuHours * price).toFixed(2)),
-    effective_cost_yuan: Number((effectiveHours * price).toFixed(2)),
+    cost_yuan: gpuHours * price,
+    effective_cost_yuan: effectiveHours == null ? null : effectiveHours * price,
     unpriced_gpu_hours: 0,
     gpu_model: rawName,
     gpu_price: price,

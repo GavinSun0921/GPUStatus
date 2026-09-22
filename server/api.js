@@ -535,8 +535,8 @@ export function createApi(app) {
           const acc = costByUser.get(row.username);
           return {
             ...base,
-            cost_yuan: acc && acc.priced ? Number(acc.cost_yuan.toFixed(2)) : null,
-            effective_cost_yuan: acc && acc.priced ? Number(acc.effective_cost_yuan.toFixed(2)) : null,
+            cost_yuan: acc && acc.priced ? round2(acc.cost_yuan) : null,
+            effective_cost_yuan: acc && acc.priced ? round2(acc.effective_cost_yuan) : null,
             unpriced_gpu_hours: acc ? Number(acc.unpriced_gpu_hours.toFixed(4)) : 0,
           };
         });
@@ -625,6 +625,17 @@ function priceUsageRows(db, app, rows, hostFilter) {
     const base = decorateUsage(row);
     const hostId = row.host_id ?? hostFilter;
     const model = hostId ? (hostGpuNames.get(hostId) ?? null) : null;
-    return { ...base, ...occupancyCost(row.gpu_seconds, row.sm_gpu_seconds, model, priceOfName) };
+    const cost = occupancyCost(row.gpu_seconds, row.sm_gpu_seconds, model, priceOfName);
+    return {
+      ...base,
+      ...cost,
+      cost_yuan: cost.cost_yuan == null ? null : round2(cost.cost_yuan),
+      effective_cost_yuan: cost.effective_cost_yuan == null ? null : round2(cost.effective_cost_yuan),
+      unpriced_gpu_hours: Number(cost.unpriced_gpu_hours.toFixed(4)),
+    };
   });
+}
+
+function round2(n) {
+  return Number(n.toFixed(2));
 }

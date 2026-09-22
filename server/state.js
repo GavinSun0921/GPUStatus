@@ -27,7 +27,9 @@ import { priceOfGpuName } from './prices.js';
  */
 function processCostYuan(elapsedS, pricePerHour) {
   if (elapsedS == null || pricePerHour == null) return null;
-  return Number(((elapsedS / 3600) * pricePerHour).toFixed(2));
+  // 4 decimal places before the UI rounds: a 10s blip on a 0.5 rate is 0.0014,
+  // and toFixed(2) would collapse a real, positive cost to "0".
+  return Number(((elapsedS / 3600) * pricePerHour).toFixed(4));
 }
 
 /**
