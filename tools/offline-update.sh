@@ -91,5 +91,13 @@ if [ "$BUILD" = 1 ]; then
   # compiler. Skipping it uses the bundled prebuild, which is the intended path.
   say "installing and building on $HOST"
   ssh "$HOST" "cd $REMOTE_DIR && npm install --omit=dev --ignore-scripts --no-audit --no-fund && npm run build" | tail -3
-  say "restart the service on $HOST: sudo systemctl restart gpustatus"
+
+  # Restart without an interactive sudo password when the host has the
+  # gpustatus-restart sudoers drop-in (see README deploy section).
+  if ssh "$HOST" "sudo -n systemctl restart gpustatus.service" 2>/dev/null; then
+    say "gpustatus.service restarted"
+  else
+    say "restart the service on $HOST: sudo systemctl restart gpustatus"
+    say "(add /etc/sudoers.d/gpustatus-restart to make this automatic)"
+  fi
 fi
