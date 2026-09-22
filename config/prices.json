@@ -1,0 +1,30 @@
+{
+  // ===========================================================================
+  //  GPUStatus rate card (standalone -- edit this without touching hosts.json)
+  //  Unit: yuan per card-hour of OCCUPANCY (占着卡就计费, 与有效算力无关).
+  //
+  //  Keys must be the EXACT string nvidia-smi reports, same as gpu_names.
+  //  Check with:  ssh <host> nvidia-smi --query-gpu=name --format=csv,noheader
+  //
+  //  Applied at report time to the permanent occupied-GPU-hours rollup.
+  //  ONLY THE CURRENT RATES COUNT -- this is an internal research-compute
+  //  estimate, not real billing, so old prices are discarded and a change
+  //  restates the whole cost history. Stored usage is never rewritten.
+  //  A model with no entry is shown as "未定价", never as 0.
+  // ===========================================================================
+  "currency": "CNY",
+  "unit": "gpu_hour",
+  "label": "2026 对标国内租卡价",
+  "note": "3090/4090 对标优云智算与矩池云;L40 与 5880 Ada 同价;6000D 按 H100 档。",
+
+  "rates": {
+    "NVIDIA GeForce RTX 2080 Ti": 0.5,
+    "NVIDIA GeForce RTX 3080 Ti": 0.8,
+    "NVIDIA GeForce RTX 3090": 1.2,
+    "NVIDIA GeForce RTX 4090": 1.8,
+    "Tesla V100-PCIE-32GB": 1.5,
+    "NVIDIA L40": 3,
+    "NVIDIA RTX 5880 Ada Generation": 3,
+    "NVIDIA RTX 6000D": 10
+  }
+}

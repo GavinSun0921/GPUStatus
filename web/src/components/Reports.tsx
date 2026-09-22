@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Card, Segmented, Table, Tag, Typography } from 'antd';
+import { Card, Segmented, Table, Tag, Typography, theme } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { useJson } from '../api';
@@ -22,23 +22,23 @@ const RANGES = [
  * user holding eight cards for a day at 10% shows a high "occupied" figure and
  * a low "effective" one, which is exactly the conversation a lab needs to have
  * at year end.
+ *
+ * Refresh is deliberately slow (hourly): these tables are hour-granular
+ * accounting, not live ops, and the year-end ranges will only get heavier.
+ * Changing the range still loads immediately.
  */
+const USAGE_REFRESH_MS = 60 * 60 * 1000;
+
 export function UsageView() {
   const colors = useSeverityColors();
+  const { token } = theme.useToken();
   const [range, setRange] = useState(RANGES[2].value);
-  const { data, loading, error } = useJson<{ from: number; to: number; rows: UsageTotalsRow[] }>(
+  const { data, loading, error, reload } = useJson<{ from: number; to: number; rows: UsageTotalsRow[] }>(
     `/api/usage/totals?from=${encodeURIComponent(range)}`,
+    { refreshMs: USAGE_REFRESH_MS },
   );
 
   const rows = data?.rows ?? [];
-  const totals = rows.reduce(
-    (acc, r) => ({
-      gpu_hours: acc.gpu_hours + r.gpu_hours,
-      effective_gpu_hours: acc.effective_gpu_hours + r.effective_gpu_hours,
-      mem_gib_hours: acc.mem_gib_hours + r.mem_gib_hours,
-    }),
-    { gpu_hours: 0, effective_gpu_hours: 0, mem_gib_hours: 0 },
-  );
 
   const columns: ColumnsType<UsageTotalsRow> = [
     { title: '用户', dataIndex: 'username', render: (u: string) => <Typography.Text strong>{u}</Typography.Text> },
@@ -84,11 +84,36 @@ export function UsageView() {
       sorter: (a, b) => a.mem_gib_hours - b.mem_gib_hours,
       render: (v: number) => v.toFixed(1),
     },
-    // "Peak cards" means the most this user held AT THE SAME TIME, across all
-    // machines -- read from usage_peak, not from the per-host rollup.
-    // A separate machine count was removed: it answered a question nobody
-    // asked, and invited reading the peak as if it were per-machine.
-    { title: '同时使用峰值', dataIndex: 'peak_gpus', align: 'right', width: 118 },
+    {
+      title: '占用成本',
+      dataIndex: 'cost_yuan',
+      align: 'right',
+      width: 120,
+      sorter: (a, b) => (a.cost_yuan ?? -1) - (b.cost_yuan ?? -1),
+      render: (v: number | null, r) => {
+        if (v == null) {
+          return (
+            <Typography.Text type="warning" style={{ fontSize: 12 }}>
+              未定价{r.unpriced_gpu_hours > 0 ? ` ${r.unpriced_gpu_hours.toFixed(1)}h` : ''}
+            </Typography.Text>
+          );
+        }
+        return (
+          <Typography.Text
+            strong
+            style={{ fontSize: 15, color: token.colorPrimary, fontVariantNumeric: 'tabular-nums' }}
+          >
+            ¥{v.toFixed(0)}
+            {r.unpriced_gpu_hours > 0 ? (
+              <Typography.Text type="warning" style={{ fontSize: 12, fontWeight: 400 }}>
+                {' '}
+                +{r.unpriced_gpu_hours.toFixed(1)}h 未定价
+              </Typography.Text>
+            ) : null}
+          </Typography.Text>
+        );
+      },
+    },
     {
       title: '首次',
       dataIndex: 'first_seen',
@@ -117,6 +142,14 @@ export function UsageView() {
       {data && (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {clock(data.from)} ~ {clock(data.to)}
+          {/* Freshness is data here, not a how-to: without it a quiet table looks broken. */}
+          {' · '}
+          每小时自动更新
+          {loading ? ' (刷新中…)' : ''}
+          {' · '}
+          <Typography.Link onClick={reload} style={{ fontSize: 12 }}>
+            立即刷新
+          </Typography.Link>
         </Typography.Text>
       )}
       {error && <Typography.Text type="danger">加载失败:{error}</Typography.Text>}
@@ -134,30 +167,6 @@ export function UsageView() {
           loading={loading}
           pagination={false}
           scroll={{ x: 'max-content' }}
-          summary={() => (
-            <Table.Summary.Row>
-              <Table.Summary.Cell index={0}>
-                <Typography.Text strong>合计</Typography.Text>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={1} align="right">
-                <Typography.Text strong>{totals.gpu_hours.toFixed(2)}</Typography.Text>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={2} align="right">
-                <Typography.Text strong>{totals.effective_gpu_hours.toFixed(2)}</Typography.Text>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={3} align="right">
-                <Typography.Text strong>
-                  {totals.gpu_hours > 0
-                    ? `${Math.round((totals.effective_gpu_hours / totals.gpu_hours) * 100)}%`
-                    : '—'}
-                </Typography.Text>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={4} align="right">
-                <Typography.Text strong>{totals.mem_gib_hours.toFixed(1)}</Typography.Text>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={5} colSpan={4} />
-            </Table.Summary.Row>
-          )}
         />
       )}
     </Card>
@@ -358,6 +367,27 @@ export function UserProcTable({ rows }: { rows: UserProcRow[] }) {
                         <Typography.Text type="secondary">—</Typography.Text>
                       ) : (
                         <Typography.Text style={{ fontSize: 11.5 }}>{duration(secs)}</Typography.Text>
+                      ),
+                  },
+                  {
+                    // Cumulative occupancy cost, same reading as the machine
+                    // page's process table.
+                    title: '累计成本',
+                    dataIndex: 'cost_yuan',
+                    width: 100,
+                    align: 'right',
+                    sorter: (a: UserProcRow, b: UserProcRow) => (a.cost_yuan ?? -1) - (b.cost_yuan ?? -1),
+                    render: (cost: number | null, proc: UserProcRow) =>
+                      cost == null ? (
+                        proc.elapsed_s == null ? (
+                          <Typography.Text type="secondary">—</Typography.Text>
+                        ) : (
+                          <Typography.Text type="warning" style={{ fontSize: 11.5 }}>
+                            未定价
+                          </Typography.Text>
+                        )
+                      ) : (
+                        <Typography.Text style={{ fontSize: 11.5 }}>¥{cost.toFixed(2)}</Typography.Text>
                       ),
                   },
                   {

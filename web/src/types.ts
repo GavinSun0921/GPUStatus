@@ -33,4 +33,5 @@ export type {
   UsageRow,
   UsageTotalsRow,
   EventRow,
+  PriceBook,
 } from '../../shared/schema';

@@ -114,6 +114,7 @@ npm run build
 
 # 2. 从模板生成自己的配置,再编辑要监控的机器列表
 cp config/hosts.example.json config/hosts.json
+cp config/prices.example.json config/prices.json
 vi config/hosts.json
 
 # 3. 先单次试跑,确认能采到数据(不启动服务)
@@ -1091,6 +1092,46 @@ proc_sample   SEARCH ... USING INDEX (ts<?)  ✓
 
 ## 10. 用量统计(年终结算)
 
+### 成本:独立价目表 `config/prices.json`
+
+占用成本按**卡时单价**在报表时换算,价目表**不在 hosts.json 里**——改价是常态
+(学期调价、对标云厂商报价、上新卡),不该和机器配置绑在一起,也不该被管理页
+整文件重写带走。
+
+**这是实验室内部科研算力消耗的粗算指标,不是真实计费。** 因此永远只用**当前
+价目**换算:改价后整段历史成本立刻按新价重算,旧价作废,不保留、不回溯分段。
+库里只存物理卡时,从不存金额。
+
+```jsonc
+// config/prices.json(支持注释;改完约 0.4s 热生效,不用重启)
+{
+  "label": "2026 对标国内租卡价",
+  "rates": {
+    "NVIDIA GeForce RTX 3090": 1.2,      // 键必须是 nvidia-smi 原始名
+    "NVIDIA GeForce RTX 4090": 1.8,
+    "NVIDIA L40": 3,
+    "NVIDIA RTX 5880 Ada Generation": 3, // 与 L40 同价,键分开方便以后拆
+    "NVIDIA RTX 6000D": 10
+  }
+}
+```
+
+| 列 | 公式 | 含义 |
+|---|---|---|
+| **占用成本** | `gpu_seconds/3600 × 单价` | 应付/应摊。占着卡就计费 |
+| 等效成本 | `sm_gpu_seconds/3600 × 单价` | 真实算力折价(对照列) |
+| 未定价 | 该卡型不在表里 | **不当 0**;单独标出小时数 |
+
+用量页**每小时自动更新**一次(可点「立即刷新」),区间切换仍会立刻拉数。
+
+几个刻意的约束:
+
+- **只用最新价,旧价作废**:成本永远 = 历史卡时 × 当前单价;不是分段计费
+- **查询时乘,不写死进库**:改完价约 0.4s 热生效;库里只有卡时,没有金额
+- **型号名存在 `hosts.gpu_name`**(永久),不依赖会被清理的 `gpu_sample`
+- **L40 / 5880 同价但键分开**:今天同价是业务决定,拆开只是改一行数字
+- 写坏 `prices.json` 不会打挂服务,旧价目继续生效(与 hosts 热重载同一策略)
+
 ### 三套指标,同时累计
 
 `usage_rollup` 表按 **(小时, 机器, 用户)** 永久累计三个积分,因为它们回答的是不同问题:
@@ -1250,7 +1291,8 @@ A: 能。API 已开启 CORS,`/api/*` 是全部契约;把 `web/dist` 交给任意
 
 ```
 GPUStatus/
-├── config/hosts.json          # ★ 要监控哪些机器(唯一需要改的配置)
+├── config/hosts.json          # ★ 要监控哪些机器
+├── config/prices.json         # ★ 卡时价目表(与 hosts 解耦,可单独改价、热更新)
 ├── shared/
 │   └── schema.ts              # ★ 接口约定的唯一来源(zod),前后端共用同一文件
 ├── server/
@@ -1259,7 +1301,14 @@ GPUStatus/
 │   ├── config-schema.ts       # 配置文件结构校验(zod)
 │   ├── collector.js           # SSH 传输 + uuid/pid/user 关联
 │   ├── remote-probe.sh        # ★ 在目标机器上运行的只读探针(POSIX sh)
-│   ├── db.js                  # 表结构、写入、用量汇总、小时汇总、清理
+│   ├── db/                    # 持久层(按职责拆分;对外只有 Db 门面)
+│   │   ├── index.js           # Db 类:构造 + 写入/查询转发
+│   │   ├── schema.js          # 建表 DDL + 列/索引迁移
+│   │   ├── repairs.js         # 一次性数据修复与回填
+│   │   ├── statements.js      # 预编译写入语句
+│   │   ├── writes.js          # 采样写入、用量积分、清理
+│   │   ├── queries.js         # 用量/趋势/事件查询
+│   │   └── helpers.js         # n/s 归一化、THROTTLE_BAD_BITS、aggregateUserUsage
 │   ├── state.js               # 内存状态 + 状态灯状态机 + 降频解码 + 事件
 │   ├── api.js                 # REST + SSE + 管理接口
 │   ├── auth.js                # 管理页认证(签名 Cookie / 限流 / 常量时间比较)

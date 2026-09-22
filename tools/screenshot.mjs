@@ -131,7 +131,7 @@ if (selector) {
   if (!el) throw new Error(`selector not found: ${selector}`);
   await el.screenshot({ path: out });
 } else if (allTabs) {
-  for (const label of ['总览', '用户', '用量', '事件', '管理']) {
+  for (const label of ['总览', '用户', '用量', '价目表', '事件', '管理']) {
     await page.getByRole('tab', { name: label }).click();
     await page.waitForTimeout(900);
     const file = `/tmp/gpustatus-${theme}-${label}.png`;

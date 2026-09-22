@@ -15,8 +15,9 @@ import { watch, createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { loadConfig, resolveHostLabel } from './config.js';
+import { loadPrices, DEFAULT_PRICES_PATH } from './prices.js';
 import { Auth, generateSecret } from './auth.js';
-import { Db } from './db.js';
+import { Db } from './db/index.js';
 import { Collector } from './collector.js';
 import { State } from './state.js';
 import { createApi } from './api.js';
@@ -79,6 +80,17 @@ log(`database      ${db.filePath}`);
 const collector = new Collector(config);
 const state = new State(config);
 
+// Standalone rate card, kept out of hosts.json so price edits never ride along
+// with machine edits. Applied at report time (see prices.js).
+let priceBook = loadPrices();
+if (priceBook.usingExample) {
+  log(`prices        using example rate card (copy ${priceBook.path} to config/prices.json)`);
+} else if (priceBook.missing) {
+  log(`prices        no config/prices.json -- cost columns will show 未定价`);
+} else {
+  log(`prices        ${Object.keys(priceBook.rates).length} rates from ${priceBook.path}`);
+}
+
 // Session secret lives in the database so admin sessions survive a restart.
 let sessionSecret = db.getMeta('session_secret');
 if (!sessionSecret) {
@@ -99,7 +111,11 @@ const app = {
   state,
   auth: new Auth(config.admin, sessionSecret),
   reloadConfig: applyConfig,
+  /** Current rate card; replaced wholesale on prices.json reload. */
+  priceRates: priceBook.rates,
+  priceMeta: priceBook.meta,
 };
+state.setPriceRates(priceBook.rates);
 
 /** Adopt a freshly loaded configuration without restarting. */
 function applyConfig(next) {
@@ -123,6 +139,45 @@ function applyConfig(next) {
   );
 
   state.notify('config');
+}
+
+/**
+ * Reload the rate card when it changes on disk.
+ *
+ * Same debounce and same "broken edit keeps the previous rates" rule as the
+ * hosts watcher: a typo in prices.json must not blank the cost columns.
+ */
+function watchPrices() {
+  const path = priceBook.missing ? DEFAULT_PRICES_PATH : priceBook.path;
+  let timer = null;
+  const reload = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        priceBook = loadPrices();
+        app.priceRates = priceBook.rates;
+        app.priceMeta = priceBook.meta;
+        state.setPriceRates(priceBook.rates);
+        log(
+          `prices reloaded: ${Object.keys(priceBook.rates).length} rates` +
+            (priceBook.usingExample ? ' (example)' : ''),
+        );
+      } catch (err) {
+        log(`prices reload FAILED (keeping the previous rates): ${err.message}`);
+      }
+    }, 400);
+  };
+  try {
+    watch(path, reload);
+    // The example file is the live source until prices.json appears; watch both
+    // so copying the example over is enough without a restart.
+    if (priceBook.usingExample || priceBook.missing) {
+      watch(DEFAULT_PRICES_PATH, reload);
+    }
+    log(`watching      ${path} for rate changes`);
+  } catch (err) {
+    log(`could not watch ${path}: ${err.message}`);
+  }
 }
 
 /**
@@ -424,6 +479,7 @@ server.listen(config.server.port, config.server.bind, () => {
   log(`frontend      ${existsSync(join(webDist, 'index.html')) ? webDist : '(not built - API only)'}`);
   // After listen, so a watch failure cannot stop the service from starting.
   watchConfig();
+  watchPrices();
 });
 
 if (args.poll) {

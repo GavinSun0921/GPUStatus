@@ -233,6 +233,29 @@ export function Machine({ host, now, site }: { host: Host; now: number; site?: s
           <Typography.Text type="secondary" style={{ fontSize: 11.5, fontWeight: 400 }}>
             {host.hostname ?? host.ssh}
           </Typography.Text>
+          {/* Hosts are single-SKU, so one rate names every card on the machine.
+              Unlisted models surface as 未定价, never as ¥0. Primary-tinted so
+              the number is scannable from the overview, not greyed out with
+              the hostname. */}
+          {(() => {
+            const price = host.gpus[0]?.price_yuan ?? null;
+            if (price == null) {
+              return hasData && host.gpus.length > 0 ? (
+                <Tag color="warning" style={{ margin: 0, fontSize: 12 }}>
+                  未定价
+                </Tag>
+              ) : null;
+            }
+            return (
+              <Tag
+                color="processing"
+                style={{ margin: 0, fontSize: 12.5, fontWeight: 600, lineHeight: '18px' }}
+              >
+                ¥{price}
+                <span style={{ fontWeight: 400, opacity: 0.85 }}> /卡·时</span>
+              </Tag>
+            );
+          })()}
           {/* Only shown when it actually distinguishes this host from the
               installation as a whole: the lab name belongs in the header once,
               not repeated on every card. */}
@@ -906,6 +929,27 @@ export function ProcTable({ gpu }: { gpu: Gpu }) {
           <Typography.Text type="secondary">—</Typography.Text>
         ) : (
           <Typography.Text style={{ fontSize: 11.5 }}>{duration(secs)}</Typography.Text>
+        ),
+    },
+    {
+      // Cumulative occupancy cost of this process: elapsed card-time x the
+      // model rate. Shared cards count each process separately -- a rough
+      // research-compute indicator, not a bill. Unpriced models stay 未定价.
+      title: '累计成本',
+      dataIndex: 'cost_yuan',
+      width: 100,
+      align: 'right',
+      render: (cost: number | null, proc) =>
+        cost == null ? (
+          proc.elapsed_s == null ? (
+            <Typography.Text type="secondary">—</Typography.Text>
+          ) : (
+            <Typography.Text type="warning" style={{ fontSize: 11.5 }}>
+              未定价
+            </Typography.Text>
+          )
+        ) : (
+          <Typography.Text style={{ fontSize: 11.5 }}>¥{cost.toFixed(2)}</Typography.Text>
         ),
     },
     {

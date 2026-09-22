@@ -1,0 +1,35 @@
+{
+  // Visual-check only: no real SSH targets, no polling.
+  "site": "NPUCVR",
+  "server": { "port": 8787, "bind": "127.0.0.1", "web_dist": "web/dist" },
+  "poll": {
+    "interval_ms": 15000,
+    "timeout_ms": 12000,
+    "stale_after_ms": 45000,
+    "down_after_failures": 3
+  },
+  "ssh": { "user": "", "control_persist_s": 60, "connect_timeout_s": 2, "extra_options": [] },
+  "db": { "path": "/tmp/gpustatus-visual/gpustatus.db", "raw_retention_hours": 168 },
+  "announcement": {
+    "enabled": true,
+    "level": "info",
+    "title": "使用须知",
+    "body": "请使用绿色状态服务器。\n成本按最新价目换算,仅作科研算力消耗参考。"
+  },
+  "gpu_names": {
+    "NVIDIA GeForce RTX 3090": "RTX 3090 (24G)",
+    "NVIDIA GeForce RTX 4090": "RTX 4090 (24G)",
+    "NVIDIA L40": "L40 (48G)",
+    "NVIDIA RTX 5880 Ada Generation": "RTX 5880 Ada (48G)",
+    "NVIDIA RTX 6000D": "RTX Pro 6000D (84G)"
+  },
+  "naming": { "strip_domain": true, "capitalize": true },
+  "admin": { "session_hours": 12 },
+  "hosts": [
+    { "id": "gpu14", "ssh": "gpu14", "expect_gpus": 8, "note": "维护窗口 3/15" },
+    { "id": "gpu16", "ssh": "gpu16", "expect_gpus": 8 },
+    { "id": "gpu18", "ssh": "gpu18", "expect_gpus": 8 },
+    { "id": "gpu19", "ssh": "gpu19", "expect_gpus": 8 },
+    { "id": "gpu20", "ssh": "gpu20", "expect_gpus": 8 }
+  ]
+}

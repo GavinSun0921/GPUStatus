@@ -20,10 +20,20 @@ import { dirname, join, resolve } from 'node:path';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '..');
 
-function sourceFiles() {
-  return readdirSync(SERVER)
-    .filter((f) => f.endsWith('.js') || f.endsWith('.ts'))
-    .map((f) => join(SERVER, f));
+function sourceFiles(dir = SERVER) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      // server/db/ holds the schema SQL; a stray backtick there is the same
+      // trap as in a top-level template literal.
+      if (entry.name === 'test' || entry.name === 'node_modules') continue;
+      out.push(...sourceFiles(path));
+    } else if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
+      out.push(path);
+    }
+  }
+  return out;
 }
 
 test('no backtick inside a SQL comment in a template literal', () => {

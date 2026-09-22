@@ -6,6 +6,7 @@ import { useSnapshot } from './api';
 import { useTheme, type ThemeMode } from './theme';
 import { Overview } from './components/Overview';
 import { EventsView, UsageView, UsersView } from './components/Reports';
+import { RatesView } from './components/RatesView';
 import { AdminView } from './components/AdminView';
 import { ago } from './format';
 
@@ -57,12 +58,13 @@ class ViewErrorBoundary extends Component<
   }
 }
 
-type Tab = 'overview' | 'users' | 'usage' | 'events' | 'admin';
+type Tab = 'overview' | 'users' | 'usage' | 'rates' | 'events' | 'admin';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'overview', label: '总览' },
   { key: 'users', label: '用户' },
   { key: 'usage', label: '用量' },
+  { key: 'rates', label: '价目表' },
   { key: 'events', label: '事件' },
   { key: 'admin', label: '管理' },
 ];
@@ -213,6 +215,7 @@ function Shell({
             {snapshot && tab === 'overview' && <Overview snapshot={snapshot} now={now} />}
             {snapshot && tab === 'users' && <UsersView snapshot={snapshot} />}
             {snapshot && tab === 'usage' && <UsageView />}
+            {tab === 'rates' && <RatesView />}
             {snapshot && tab === 'events' && <EventsView />}
             {tab === 'admin' && <AdminView snapshot={snapshot} />}
           </ViewErrorBoundary>

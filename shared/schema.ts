@@ -43,6 +43,8 @@ export const GpuProcSchema = z.object({
   elapsed_s: num,
   used_mem_mib: num,
   sm_pct: num,
+  /** elapsed card-time x the host model's hourly rate; null when unpriced */
+  cost_yuan: num,
 });
 
 export const GpuSchema = z.object({
@@ -52,6 +54,8 @@ export const GpuSchema = z.object({
   name: str,
   /** short display name resolved server-side; never render `name` directly */
   display_name: str,
+  /** yuan per card-hour from config/prices.json; null when this model is unlisted */
+  price_yuan: num,
   util: num,
   mem_used_mib: num,
   mem_total_mib: num,
@@ -116,6 +120,7 @@ export const HostUserProcSchema = z.object({
   elapsed_s: num,
   used_mem_mib: num,
   sm_pct: num,
+  cost_yuan: num,
 });
 
 export const HostUserSchema = z.object({
@@ -316,6 +321,18 @@ export const UsageRowSchema = z.object({
   gpu_hours: z.number(),
   effective_gpu_hours: z.number(),
   mem_gib_hours: z.number(),
+  /**
+   * Occupancy cost = occupied GPU-hours x the host model's card-hour rate.
+   *
+   * Null (not 0) when the model has no configured price -- charging an
+   * unlisted card at zero would understate the bill. `unpriced_gpu_hours`
+   * carries the hours that could not be priced.
+   */
+  cost_yuan: z.number().nullable(),
+  effective_cost_yuan: z.number().nullable(),
+  unpriced_gpu_hours: z.number(),
+  gpu_model: str,
+  gpu_price: z.number().nullable(),
 });
 
 export const UsageTotalsRowSchema = z.object({
@@ -335,6 +352,10 @@ export const UsageTotalsRowSchema = z.object({
   gpu_hours: z.number(),
   effective_gpu_hours: z.number(),
   mem_gib_hours: z.number(),
+  /** Sum of per-host occupancy costs; null when nothing in range was priced. */
+  cost_yuan: z.number().nullable(),
+  effective_cost_yuan: z.number().nullable(),
+  unpriced_gpu_hours: z.number(),
 });
 
 export const EventRowSchema = z.object({
@@ -342,6 +363,19 @@ export const EventRowSchema = z.object({
   host_id: z.string(),
   kind: z.string(),
   message: str,
+});
+
+// --- rate card --------------------------------------------------------------
+
+/** Standalone price list (`config/prices.json`), yuan per card-hour of occupancy. */
+export const PriceBookSchema = z.object({
+  currency: z.literal('CNY'),
+  unit: z.literal('gpu_hour'),
+  label: str,
+  note: str,
+  rates: z.record(z.string(), z.number()),
+  /** hosts currently on each raw nvidia-smi model, for the rates page */
+  hosts_by_model: z.record(z.string(), z.array(z.string())),
 });
 
 // --- admin configuration ----------------------------------------------------
@@ -456,6 +490,7 @@ export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type UsageRow = z.infer<typeof UsageRowSchema>;
 export type UsageTotalsRow = z.infer<typeof UsageTotalsRowSchema>;
 export type EventRow = z.infer<typeof EventRowSchema>;
+export type PriceBook = z.infer<typeof PriceBookSchema>;
 export type HistoryPoint = z.infer<typeof HistoryPointSchema>;
 export type MachineHistory = z.infer<typeof MachineHistorySchema>;
 export type EditableHost = z.infer<typeof EditableHostSchema>;

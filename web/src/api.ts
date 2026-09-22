@@ -79,11 +79,15 @@ export function useSnapshot() {
 }
 
 /** One-shot JSON fetch with loading/error state, for the report pages. */
-export function useJson<T>(url: string | null) {
+export function useJson<T>(url: string | null, options: { refreshMs?: number } = {}) {
+  const { refreshMs = 0 } = options;
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  // Bumped only when a fetch starts, so the optional refresh timer can decide
+  // whether enough time has actually passed since the last request.
+  const fetchedAtRef = useRef(0);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -92,6 +96,7 @@ export function useJson<T>(url: string | null) {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
+    fetchedAtRef.current = Date.now();
 
     fetch(url, { signal: controller.signal })
       .then(async (res) => {
@@ -110,6 +115,23 @@ export function useJson<T>(url: string | null) {
 
     return () => controller.abort();
   }, [url, nonce]);
+
+  /**
+   * Optional slow refresh for report pages whose underlying rollup barely moves.
+   *
+   * The usage tables are hour-granular accounting, not live ops -- polling them
+   * with the dashboard would only add load for numbers that change at most once
+   * an hour. The interval is a floor: a range change still fetches immediately
+   * via the url dependency above.
+   */
+  useEffect(() => {
+    if (!url || !refreshMs || refreshMs < 60_000) return;
+    const timer = setInterval(() => {
+      if (Date.now() - fetchedAtRef.current < refreshMs) return;
+      setNonce((n) => n + 1);
+    }, Math.min(refreshMs, 60_000));
+    return () => clearInterval(timer);
+  }, [url, refreshMs]);
 
   return { data, loading, error, reload };
 }

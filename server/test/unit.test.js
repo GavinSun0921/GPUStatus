@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deriveHostLabel, loadConfig, parseJsonc, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
-import { Db, aggregateUserUsage } from '../db.js';
+import { Db, aggregateUserUsage, occupancyCost } from '../db/index.js';
+import { loadPrices, priceOfGpuName } from '../prices.js';
 import { State, decodeThrottle, displayGpuName, gpuCountWarning, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
 import { Auth, parseCookies } from '../auth.js';
@@ -938,6 +939,83 @@ test('the gpu_names map survives a config round trip', () => {
   }
 });
 
+// -------------------------------------------------------- rate card --------
+
+test('the rate card lives outside hosts.json and keys off nvidia-smi names', () => {
+  const path = join(tmpdir(), `gpustatus-prices-${process.pid}.json`);
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        label: 'test',
+        rates: {
+          'NVIDIA GeForce RTX 3090': 1.2,
+          'NVIDIA L40': 3,
+          'NVIDIA RTX 5880 Ada Generation': 3,
+          'NVIDIA RTX 6000D': 10,
+        },
+      }),
+      'utf8',
+    );
+    const book = loadPrices(path);
+    assert.equal(book.missing, false);
+    assert.equal(priceOfGpuName('NVIDIA GeForce RTX 3090', book.rates), 1.2);
+    // L40 and 5880 Ada share a rate on purpose; they are separate keys so the
+    // day they diverge is a one-line edit, not a code change.
+    assert.equal(priceOfGpuName('NVIDIA L40', book.rates), 3);
+    assert.equal(priceOfGpuName('NVIDIA RTX 5880 Ada Generation', book.rates), 3);
+    assert.equal(priceOfGpuName('NVIDIA RTX 6000D', book.rates), 10);
+    // An unlisted model must NOT fall through to 0 -- that would understate cost.
+    assert.equal(priceOfGpuName('NVIDIA H100', book.rates), null);
+    assert.equal(priceOfGpuName(null, book.rates), null);
+  } finally {
+    rmSync(path, { force: true });
+  }
+});
+
+test('occupancy cost prices held card-hours, and never charges an unlisted model at 0', () => {
+  const rates = {
+    'NVIDIA GeForce RTX 3090': 1.2,
+    'NVIDIA RTX 6000D': 10,
+  };
+  const priceOfName = (n) => priceOfGpuName(n, rates);
+
+  // 2 card-hours on a 3090 = 2 * 1.2.
+  const priced = occupancyCost(7200, 3600, 'NVIDIA GeForce RTX 3090', priceOfName);
+  assert.equal(priced.cost_yuan, 2.4);
+  // Effective cost uses SM hours, same rate -- the "if billed for useful work"
+  // column, not a different price.
+  assert.equal(priced.effective_cost_yuan, 1.2);
+  assert.equal(priced.unpriced_gpu_hours, 0);
+
+  // 6000D is the premium tier: same hours, much higher bill.
+  const premium = occupancyCost(7200, 0, 'NVIDIA RTX 6000D', priceOfName);
+  assert.equal(premium.cost_yuan, 20);
+
+  // Unlisted model: cost is null (unknown), and the hours are still accounted.
+  const unpriced = occupancyCost(3600, 0, 'NVIDIA H100', priceOfName);
+  assert.equal(unpriced.cost_yuan, null);
+  assert.equal(unpriced.unpriced_gpu_hours, 1);
+});
+
+test('a rate change restates the whole cost history; old prices are discarded', () => {
+  // The cost columns are an internal research-compute estimate, not a bill.
+  // Only the CURRENT rate card is ever applied -- there is no price history
+  // in the database and none is wanted.
+  const hours = 3600 * 10; // 10 occupied card-hours already in the rollup
+  const oldRates = { 'NVIDIA GeForce RTX 3090': 1.2 };
+  const newRates = { 'NVIDIA GeForce RTX 3090': 2.0 };
+
+  const before = occupancyCost(hours, 0, 'NVIDIA GeForce RTX 3090', (n) => priceOfGpuName(n, oldRates));
+  const after = occupancyCost(hours, 0, 'NVIDIA GeForce RTX 3090', (n) => priceOfGpuName(n, newRates));
+
+  assert.equal(before.cost_yuan, 12);
+  // Same stored card-hours, new rate -> the entire history now reads at the new
+  // price. Nothing is weighted by when it was used.
+  assert.equal(after.cost_yuan, 20);
+  assert.equal(after.gpu_price, 2);
+});
+
 // --------------------------------------------------- announcement + notes --
 
 test('an announcement is opt-in and needs actual text', () => {
@@ -1368,6 +1446,46 @@ test('totals report the simultaneous peak, not the per-machine maximum', () => {
   const [row] = db.queryUsageTotals({ fromTs: ts - 3600000, toTs: ts + 3600000 });
   assert.equal(row.peak_gpus, 12, 'the totals query fell back to the per-machine maximum');
   assert.equal(row.gpu_seconds, 720, 'the GPU-seconds total changed');
+  db.close();
+});
+
+test('cost is computed from permanent host model names, not from pruned samples', () => {
+  const db = new Db(':memory:');
+  const ts = Date.now();
+  db.db
+    .prepare('INSERT INTO hosts (id, label, ssh_target, first_seen, gpu_name) VALUES (?,?,?,?,?)')
+    .run('gpu1', 'gpu1', 'gpu1', ts, 'NVIDIA GeForce RTX 3090');
+  db.db
+    .prepare('INSERT INTO hosts (id, label, ssh_target, first_seen, gpu_name) VALUES (?,?,?,?,?)')
+    .run('gpu2', 'gpu2', 'gpu2', ts, 'NVIDIA RTX 6000D');
+  db.db
+    .prepare(
+      `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+         sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+    )
+    .run(Math.floor(ts / 3600000) * 3600000, 'gpu1', 'alice', 3600, 1800, 0, 1, 0);
+  db.db
+    .prepare(
+      `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+         sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+    )
+    .run(Math.floor(ts / 3600000) * 3600000, 'gpu2', 'alice', 3600, 3600, 0, 1, 0);
+
+  const names = db.loadHostGpuNames();
+  assert.equal(names.get('gpu1'), 'NVIDIA GeForce RTX 3090');
+  assert.equal(names.get('gpu2'), 'NVIDIA RTX 6000D');
+
+  const rates = { 'NVIDIA GeForce RTX 3090': 1.2, 'NVIDIA RTX 6000D': 10 };
+  const priceOfName = (n) => priceOfGpuName(n, rates);
+  let cost = 0;
+  for (const r of db.queryUsageByUserHost({ fromTs: ts - 3600000, toTs: ts + 3600000 })) {
+    const c = occupancyCost(r.gpu_seconds, r.sm_gpu_seconds, names.get(r.host_id), priceOfName);
+    cost += c.cost_yuan ?? 0;
+  }
+  // 1h on 3090 (1.2) + 1h on 6000D (10) = 11.2 -- mixed models price per host.
+  assert.equal(Number(cost.toFixed(2)), 11.2);
   db.close();
 });
 

@@ -14,8 +14,21 @@
  * and a latched status would leave every host showing green forever.
  */
 
-import { aggregateUserUsage } from './db.js';
+import { aggregateUserUsage } from './db/index.js';
 import { resolveHostLabel } from './config.js';
+import { priceOfGpuName } from './prices.js';
+
+/**
+ * Cumulative occupancy cost of one process: elapsed card-time x the model rate.
+ *
+ * Shared cards count each process separately -- this is a rough research-compute
+ * indicator, not a bill. Null when the model is unpriced or the runtime is
+ * unknown, never a silent 0.
+ */
+function processCostYuan(elapsedS, pricePerHour) {
+  if (elapsedS == null || pricePerHour == null) return null;
+  return Number(((elapsedS / 3600) * pricePerHour).toFixed(2));
+}
 
 /**
  * Short, human-facing GPU name.
@@ -264,6 +277,13 @@ export const STATUS = {
 export class State {
   constructor(config) {
     this.config = config;
+    /**
+     * Occupancy rates (yuan / card-hour) keyed by the exact nvidia-smi name.
+     *
+     * Injected from the standalone rate card and always the CURRENT table --
+     * cost on the live view is an internal estimate, not a billed history.
+     */
+    this.priceRates = {};
     this.hosts = new Map();
     this.startedAt = Date.now();
     this.lastPollCompletedAt = null;
@@ -287,6 +307,11 @@ export class State {
 
     this.listeners = new Set();
     this.transitionHandlers = new Set();
+  }
+
+  /** Replace the rate card without touching host state. */
+  setPriceRates(rates) {
+    this.priceRates = rates ?? {};
   }
 
   /**
@@ -599,14 +624,21 @@ export class State {
           //     workload is 0% in roughly half of individual samples.
           // Getting either wrong reported a working job as an idle allocation.
           ...windowedSm(entry.userSm?.get(u.username), u.smSum, u.smGpus),
-          procs: procs.map((p) => ({
-            pid: p.pid,
-            name: p.name,
-            gpu_index: p.gpuIndex,
-            elapsed_s: p.elapsedS ?? null,
-            used_mem_mib: p.usedMemMib,
-            sm_pct: p.smPct,
-          })),
+          procs: procs.map((p) => {
+            const gpu = latest.gpus?.find((g) => g.index === p.gpuIndex);
+            return {
+              pid: p.pid,
+              name: p.name,
+              gpu_index: p.gpuIndex,
+              elapsed_s: p.elapsedS ?? null,
+              used_mem_mib: p.usedMemMib,
+              sm_pct: p.smPct,
+              cost_yuan: processCostYuan(
+                p.elapsedS ?? null,
+                priceOfGpuName(gpu?.name, this.priceRates),
+              ),
+            };
+          }),
         };
       })
       .sort((a, b) => b.gpu_count - a.gpu_count || b.mem_mib - a.mem_mib);
@@ -722,6 +754,8 @@ export class State {
         // Friendly name resolved on the server so the UI, the API and any export
         // all agree. Unmapped models fall back to a shortened raw name.
         display_name: displayGpuName(g.name, this.config.gpuNames),
+        // Occupancy rate for this exact model; null when unlisted (never 0).
+        price_yuan: priceOfGpuName(g.name, this.priceRates),
         util: g.util,
         mem_used_mib: g.memUsedMib,
         mem_total_mib: g.memTotalMib,
@@ -769,6 +803,10 @@ export class State {
             elapsed_s: p.elapsedS ?? null,
             used_mem_mib: p.usedMemMib,
             sm_pct: p.smPct,
+            cost_yuan: processCostYuan(
+              p.elapsedS ?? null,
+              priceOfGpuName(g.name, this.priceRates),
+            ),
           })),
       })),
       users: this.#hostUsers(entry),

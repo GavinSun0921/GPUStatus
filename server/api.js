@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { loadConfig, serializeConfig } from './config.js';
+import { occupancyCost } from './db/index.js';
+import { priceOfGpuName } from './prices.js';
 import { SESSION_COOKIE, parseCookies } from './auth.js';
 
 const HOUR_MS = 3600 * 1000;
@@ -486,30 +488,85 @@ export function createApi(app) {
       case '/api/usage': {
         const { from, to } = resolveWindow(searchParams, DAY_MS);
         const bucketSeconds = Math.max(0, Number(searchParams.get('bucket')) || 0);
+        const hostFilter = searchParams.get('host') || null;
         const rows = db.queryUsage({
           fromTs: from,
           toTs: to,
-          hostId: searchParams.get('host') || null,
+          hostId: hostFilter,
           username: searchParams.get('user') || null,
           bucketSeconds,
         });
-        json(res, 200, { from, to, bucket_seconds: bucketSeconds, rows: rows.map(decorateUsage) });
+        const priced = priceUsageRows(db, app, rows, hostFilter);
+        json(res, 200, { from, to, bucket_seconds: bucketSeconds, rows: priced });
         return true;
       }
 
       case '/api/usage/totals': {
         const { from, to } = resolveWindow(searchParams, 30 * DAY_MS);
+        const hostFilter = searchParams.get('host') || null;
         const rows = db.queryUsageTotals({
           fromTs: from,
           toTs: to,
-          hostId: searchParams.get('host') || null,
+          hostId: hostFilter,
         });
-        json(res, 200, { from, to, rows: rows.map(decorateUsage) });
+        // Totals are summed across machines of different models, so cost is
+        // aggregated per (user, host) first and then folded into each user row.
+        const byUserHost = db.queryUsageByUserHost({ fromTs: from, toTs: to, hostId: hostFilter });
+        const hostGpuNames = db.loadHostGpuNames();
+        const priceOfName = (name) => priceOfGpuName(name, app.priceRates);
+        const costByUser = new Map();
+        for (const r of byUserHost) {
+          const model = hostGpuNames.get(r.host_id) ?? null;
+          const c = occupancyCost(r.gpu_seconds, r.sm_gpu_seconds, model, priceOfName);
+          let acc = costByUser.get(r.username);
+          if (!acc) {
+            acc = { cost_yuan: 0, effective_cost_yuan: 0, unpriced_gpu_hours: 0, priced: false };
+            costByUser.set(r.username, acc);
+          }
+          if (c.cost_yuan != null) {
+            acc.cost_yuan += c.cost_yuan;
+            acc.effective_cost_yuan += c.effective_cost_yuan ?? 0;
+            acc.priced = true;
+          }
+          acc.unpriced_gpu_hours += c.unpriced_gpu_hours;
+        }
+        const priced = rows.map((row) => {
+          const base = decorateUsage(row);
+          const acc = costByUser.get(row.username);
+          return {
+            ...base,
+            cost_yuan: acc && acc.priced ? Number(acc.cost_yuan.toFixed(2)) : null,
+            effective_cost_yuan: acc && acc.priced ? Number(acc.effective_cost_yuan.toFixed(2)) : null,
+            unpriced_gpu_hours: acc ? Number(acc.unpriced_gpu_hours.toFixed(4)) : 0,
+          };
+        });
+        json(res, 200, { from, to, rows: priced });
         return true;
       }
 
       case '/api/usage/users': {
         json(res, 200, { users: db.queryRecentUsers(now - 7 * DAY_MS) });
+        return true;
+      }
+
+      case '/api/prices': {
+        // The standalone rate card, plus which machines are on each model so
+        // the rates page can say what the lab actually runs.
+        const modelOf = db.loadHostGpuNames();
+        const hostsByModel = {};
+        for (const h of config().hosts) {
+          const raw = modelOf.get(h.id) ?? null;
+          if (!raw) continue;
+          (hostsByModel[raw] ??= []).push(h.label ?? h.id);
+        }
+        json(res, 200, {
+          currency: 'CNY',
+          unit: 'gpu_hour',
+          label: app.priceMeta?.label ?? null,
+          note: app.priceMeta?.note ?? null,
+          rates: app.priceRates ?? {},
+          hosts_by_model: hostsByModel,
+        });
         return true;
       }
 
@@ -553,4 +610,21 @@ function decorateUsage(row) {
     mem_gib_hours:
       row.mem_mib_seconds === null ? null : Number((row.mem_mib_seconds / 1024 / 3600).toFixed(4)),
   };
+}
+
+/**
+ * Attach occupancy cost to time-series usage rows.
+ *
+ * `hostFilter` covers the case where the query collapsed host_id (single-host
+ * filter groups by user only); otherwise each row carries its own host.
+ */
+function priceUsageRows(db, app, rows, hostFilter) {
+  const hostGpuNames = db.loadHostGpuNames();
+  const priceOfName = (name) => priceOfGpuName(name, app.priceRates);
+  return rows.map((row) => {
+    const base = decorateUsage(row);
+    const hostId = row.host_id ?? hostFilter;
+    const model = hostId ? (hostGpuNames.get(hostId) ?? null) : null;
+    return { ...base, ...occupancyCost(row.gpu_seconds, row.sm_gpu_seconds, model, priceOfName) };
+  });
 }

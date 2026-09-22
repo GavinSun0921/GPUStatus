@@ -102,3 +102,19 @@ export function statusLabel(status: string): string {
       return '未知';
   }
 }
+
+/**
+ * Short GPU name from a raw nvidia-smi string (no config map on the client).
+ *
+ * Mirrors the server-side fallback in `displayGpuName`: drop the vendor prefix
+ * and marketing suffix, keep the model number -- the only bit anyone reads.
+ */
+export function displayFallbackName(rawName: string | null | undefined): string {
+  if (!rawName) return '—';
+  return String(rawName)
+    .replace(/^(NVIDIA\s+)?(GeForce|Tesla|Quadro|RTX\s+Pro)\s+/i, '')
+    .replace(/^NVIDIA\s+/i, '')
+    .replace(/\s+Generation$/i, '')
+    .replace(/\s+(PCIe|SXM\d?)$/i, '')
+    .trim();
+}

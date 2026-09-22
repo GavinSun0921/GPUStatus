@@ -250,7 +250,42 @@ for (const label of [
 }
 
 // And the per-card telemetry, shown when a card row is expanded.
-const telemetryView = renderView(<CardTelemetry gpu={snapshot.hosts[0].gpus[0]} />);
+// Rendered from a live card when the cluster has one; otherwise from a synthetic
+// fixture -- hosts that have never been polled legitimately have zero GPUs, and
+// `gpus[0]` being undefined must not be mistaken for a CardTelemetry bug.
+const firstGpu = snapshot.hosts.flatMap((h) => h.gpus)[0] ?? {
+  index: 0,
+  uuid: 'render-check-telemetry',
+  name: 'NVIDIA GeForce RTX 4090',
+  display_name: 'RTX 4090 (24G)',
+  price_yuan: 1.8,
+  util: 50,
+  mem_used_mib: 12000,
+  mem_total_mib: 24564,
+  mem_pct: 49,
+  temp_c: 70,
+  power_w: 300,
+  fan_pct: 40,
+  mem_util_pct: 35,
+  pcie_gen: 4,
+  pcie_width: 16,
+  pcie_gen_max: 4,
+  pcie_width_max: 16,
+  n_procs: 1,
+  procs: [
+    { pid: 1, username: 'alice', name: 'python', elapsed_s: 60, used_mem_mib: 12000, sm_pct: 50, cost_yuan: 0.03 },
+  ],
+  throttle_mask: 0,
+  throttle_reasons: [],
+  throttled: false,
+  thermal_recent_pct: null,
+  sm_clock_mhz: 2500,
+  sm_clock_max_mhz: 2520,
+  power_limit_w: 450,
+  pstate: 'P0',
+  bus_id: '00:00.0',
+} satisfies Gpu;
+const telemetryView = renderView(<CardTelemetry gpu={firstGpu} />);
 const telemetryText = telemetryView.textContent ?? '';
 for (const label of ['SM 时钟', '显存带宽', '风扇', 'P-State', 'PCIe', '降频原因']) {
   check(telemetryText.includes(label), `card telemetry is missing "${label}"`);
@@ -263,10 +298,16 @@ for (const label of ['SM 时钟', '显存带宽', '风扇', 'P-State', 'PCIe', '
 // which short-circuited to always true -- `countOf` counts CLASSES, and there is
 // no `散热` class, so the assertion could never fail. Keep it to text.)
 check(html.includes('散热'), 'the machine card is missing its cooling meter');
-check(
-  html.includes('距降频') || html.includes('近期热降频') || html.includes('已达降频温度'),
-  'the cooling meter renders no headroom or throttle state',
-);
+// Headroom only exists once a machine has been sampled. A never-polled host
+// legitimately shows "—" with no throttle wording -- that is "unknown", not a
+// broken meter. The wording itself is asserted on the synthetic fixture below,
+// which always carries a thermally throttled card.
+if (expectedGpus > 0) {
+  check(
+    html.includes('距降频') || html.includes('近期热降频') || html.includes('已达降频温度'),
+    'the cooling meter renders no headroom or throttle state',
+  );
+}
 
 // Every machine must offer its detail toggle, and the chart must NOT be in the
 // initial markup -- it is collapsed by default and fetched on demand, so a
@@ -418,6 +459,7 @@ const card = (
   uuid: `synthetic-${index}`,
   name: 'NVIDIA GeForce RTX 4090',
   display_name: 'RTX 4090 (24G)',
+  price_yuan: 1.8,
   util: 0,
   mem_used_mib: 0,
   mem_total_mib: 24564,
@@ -452,9 +494,9 @@ const sharedCard = card(1, {
   power_w: 300,
   n_procs: 3,
   procs: [
-    { pid: 111111, username: 'alice', name: 'python train.py', elapsed_s: 3600, used_mem_mib: 8000, sm_pct: 45 },
-    { pid: 222222, username: 'bob', name: 'python eval.py', elapsed_s: 7200, used_mem_mib: 7000, sm_pct: 35 },
-    { pid: 333333, username: 'carol', name: 'python infer.py', elapsed_s: 10800, used_mem_mib: 5000, sm_pct: 20 },
+    { pid: 111111, username: 'alice', name: 'python train.py', elapsed_s: 3600, used_mem_mib: 8000, sm_pct: 45, cost_yuan: 1.8 },
+    { pid: 222222, username: 'bob', name: 'python eval.py', elapsed_s: 7200, used_mem_mib: 7000, sm_pct: 35, cost_yuan: 3.6 },
+    { pid: 333333, username: 'carol', name: 'python infer.py', elapsed_s: 10800, used_mem_mib: 5000, sm_pct: 20, cost_yuan: 5.4 },
   ],
 });
 
@@ -498,7 +540,7 @@ const synthetic: Snapshot = {
           mem_used_mib: 100,
           mem_pct: 0.4,
           n_procs: 1,
-          procs: [{ pid: 444444, username: null, name: 'unknown', elapsed_s: null, used_mem_mib: 100, sm_pct: null }],
+          procs: [{ pid: 444444, username: null, name: 'unknown', elapsed_s: null, used_mem_mib: 100, sm_pct: null, cost_yuan: null }],
         }),
         card(3, {
           // thermally throttled at 100% utilisation -- the case the whole
@@ -511,7 +553,7 @@ const synthetic: Snapshot = {
           power_w: 260,
           n_procs: 1,
           procs: [
-            { pid: 555555, username: 'dave', name: 'python train.py', elapsed_s: 86400, used_mem_mib: 40000, sm_pct: 98 },
+            { pid: 555555, username: 'dave', name: 'python train.py', elapsed_s: 86400, used_mem_mib: 40000, sm_pct: 98, cost_yuan: 43.2 },
           ],
           throttle_mask: 0x20,
           throttle_reasons: ['热降频'],
@@ -539,7 +581,7 @@ const expandedText = expandedView.textContent ?? '';
 const userProcView = renderView(
   <UserProcTable
     rows={[
-      { hostId: 'h1', hostLabel: 'Server19', pid: 4242, name: 'train.py', gpu_index: 3, elapsed_s: 273_600, used_mem_mib: 40_000, sm_pct: 91 },
+      { hostId: 'h1', hostLabel: 'Server19', pid: 4242, name: 'train.py', gpu_index: 3, elapsed_s: 273_600, used_mem_mib: 40_000, sm_pct: 91, cost_yuan: 136.8 },
     ]}
   />,
 );
@@ -581,6 +623,12 @@ const edgeChecks: [boolean, string][] = [
     'a card shared by three processes does not show all three PIDs',
   ],
   [edgeText.includes('alice@111111'), 'process chip is not in user@pid form'],
+  // Cumulative process cost must surface next to runtime. Unpriced models stay
+  // 未定价 / null, never a silent ¥0.
+  [expandedText.includes('累计成本'), 'process table has no 累计成本 column'],
+  [expandedText.includes('¥5.40'), 'process cumulative cost is not rendered'],
+  [userProcText.includes('累计成本'), 'user process table has no 累计成本 column'],
+  [userProcText.includes('¥136.80'), 'user process cumulative cost is not rendered'],
   // The throttled card must be marked. Without this the card reads as a healthy
   // 100%-utilisation GPU, which is exactly the failure mode that hid Server19's
   // thermal throttling.
@@ -590,6 +638,13 @@ const edgeChecks: [boolean, string][] = [
   [edgeText.includes('5/8 张卡热降频'), 'throttle warning is not rendered in Chinese'],
   [!edgeText.includes('throttled:5/8_thermal'), 'raw throttle code leaked into the UI'],
   [edgeText.includes('降频'), 'throttle tag has no text'],
+  // Cooling meter wording (headroom / thermal state). Asserted here rather than
+  // on the live markup: never-polled hosts have no temperatures, and "—" is the
+  // honest answer there. The synthetic host always carries a hot throttled card.
+  [
+    edgeText.includes('距降频') || edgeText.includes('近期热降频') || edgeText.includes('已达降频温度'),
+    'the cooling meter renders no headroom or throttle state',
+  ],
   [edgeText.includes('未知用户'), 'unresolved process owner is not labelled'],
   [
     countOf('gpu-row', edgeView) === 4,
