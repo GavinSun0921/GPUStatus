@@ -75,12 +75,7 @@ export function warningLabel(code: string): string {
   if (code.startsWith('throttled:')) {
     const m = /throttled:(\d+)\/(\d+)_(\w+)/.exec(code);
     if (!m) return code;
-    const what =
-      m[3] === 'thermal'
-        ? '热降频'
-        : m[3] === 'thermal_recent'
-          ? '近期出现热降频'
-          : '功耗墙限频';
+    const what = m[3] === 'thermal' ? '热降频' : m[3] === 'thermal_recent' ? '近期出现热降频' : m[3];
     return `${m[1]}/${m[2]} 张卡${what}`;
   }
   if (code.startsWith('pcie_degraded:')) {

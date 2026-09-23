@@ -719,14 +719,14 @@ function NetMountPanel({ host }: { host: Host }) {
  *
  * A power cap at full utilisation is the card doing exactly what it is
  * configured to do -- every one of Server14's eight cards sits there whenever it
- * is busy. Painting that red trains people to ignore the colour. Thermal and
- * hardware reasons are the ones worth a red mark.
+ * is busy. Painting that red (or amber) trains people to ignore the colour.
+ * Thermal and hardware reasons are the ones worth a red mark; power cap is
+ * informational only.
  */
 function throttleTone(gpu: Gpu, token: ReturnType<typeof theme.useToken>['token']) {
   if (gpu.throttle_reasons.length === 0) return undefined;
   const serious = gpu.throttle_reasons.some((r) => r !== '功耗墙' && r !== '空闲');
-  if (serious) return token.colorError;
-  return gpu.throttle_reasons.includes('功耗墙') ? token.colorWarning : token.colorTextTertiary;
+  return serious ? token.colorError : token.colorTextTertiary;
 }
 
 /**
@@ -789,13 +789,8 @@ export function CardTelemetry({ gpu }: { gpu: Gpu }) {
         ) : (
           // Shown against the limit, because "212 W" means nothing without it:
           // 212 of 285 is a card with headroom, 212 of 220 is a card pinned at
-          // its cap.
-          <span
-            style={{
-              color:
-                gpu.power_w / gpu.power_limit_w >= 0.98 ? token.colorWarning : undefined,
-            }}
-          >
+          // its cap. No colour: hitting the power wall at full load is normal.
+          <span>
             {Math.round(gpu.power_w)} / {Math.round(gpu.power_limit_w)} W
             <Typography.Text type="secondary" style={{ fontSize: 11 }}>
               {' '}
@@ -803,7 +798,7 @@ export function CardTelemetry({ gpu }: { gpu: Gpu }) {
             </Typography.Text>
           </span>
         ),
-        '当前功耗 / 该卡功耗上限。接近 100% 说明卡在功耗墙上,再快也快不了。',
+        '当前功耗 / 该卡功耗上限。',
       )}
       {cell(
         'PCIe',
@@ -829,7 +824,7 @@ export function CardTelemetry({ gpu }: { gpu: Gpu }) {
         ) : (
           <span style={{ color: throttleTone(gpu, token) }}>{gpu.throttle_reasons.join(' · ')}</span>
         ),
-        '热降频是散热问题,需要处理;功耗墙是满载时的正常表现。',
+        '热降频/硬件降频是散热或硬件问题,需要处理;功耗墙是满载时的正常表现,不告警。',
       )}
       {cell(
         '近 1 小时热降频',

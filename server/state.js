@@ -61,13 +61,14 @@ export function displayGpuName(rawName, gpuNames) {
  * `bad` marks the reasons that mean the card is delivering less than it should
  * WHILE IT HAS WORK TO DO. GpuIdle is deliberately not bad: an idle card
  * downclocks by design, and flagging that would light up every quiet machine.
- * The rest of the hardware reasons are grouped under one label because the
- * operator's next step is the same for all of them -- go and look at the card.
+ * PowerCap is likewise not bad: hitting the wall at full utilisation is the
+ * card behaving as configured, and alerting on it would train people to ignore
+ * the tag. Thermal and hardware reasons are the ones worth a red mark.
  */
 export const THROTTLE_REASONS = [
   { bit: 0x001, label: '空闲', bad: false },
   { bit: 0x002, label: '应用时钟限制', bad: false },
-  { bit: 0x004, label: '功耗墙', bad: true },
+  { bit: 0x004, label: '功耗墙', bad: false },
   { bit: 0x008, label: '硬件降频', bad: true },
   { bit: 0x010, label: '同步加速', bad: false },
   { bit: 0x020, label: '热降频', bad: true },
@@ -131,30 +132,28 @@ export function thermalShare(ring) {
 }
 
 /**
- * One warning entry when any card on a host is throttled for a reason that
- * costs performance, e.g. "throttled:5/8_thermal".
+ * One warning entry when any card on a host is thermally throttled, e.g.
+ * "throttled:5/8_thermal".
  *
- * Reasons are reduced to a short set: an operator needs to know how many cards
- * and roughly why, then goes to look.
+ * Power cap (0x004) is deliberately not warned about: hitting the wall at full
+ * utilisation is the card behaving as configured, and the noise drowned out the
+ * thermal events that someone can actually act on. Reasons are reduced to a
+ * short set: an operator needs to know how many cards and roughly why, then
+ * goes to look.
  */
 export function throttleWarnings(sample, thermal) {
   if (!sample || !Array.isArray(sample.gpus) || sample.gpus.length === 0) return [];
 
   const hot = [];
-  const power = [];
   for (const g of sample.gpus) {
     const idle = g.nProcs === 0 && (g.util === null || g.util < 5);
     const { mask } = decodeThrottle(g.throttleMask, { idle });
     if (mask === null) continue;
     if ((mask & 0x020) !== 0 || (mask & 0x040) !== 0) hot.push(g.index);
-    else if ((mask & 0x004) !== 0) power.push(g.index);
   }
 
   const out = [];
-  // Thermal first: it is a cooling problem someone can act on, whereas a power
-  // cap at full utilisation is the card behaving as configured.
   if (hot.length > 0) out.push(`throttled:${hot.length}/${sample.gpus.length}_thermal`);
-  if (power.length > 0) out.push(`throttled:${power.length}/${sample.gpus.length}_power_cap`);
 
   // A PCIe link that has trained NARROWER than the card supports runs slower
   // while every other metric looks normal.

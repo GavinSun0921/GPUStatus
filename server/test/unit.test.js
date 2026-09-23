@@ -1144,14 +1144,17 @@ test('the throttle bitmask decodes to the reasons an operator acts on', () => {
 
   // Observed live on Server20: no bits set, card at full clock.
   assert.deepEqual(decodeThrottle(0x0, busy), { mask: 0, reasons: [], throttled: false });
-  // Observed live on Server14/18 at full utilisation.
+  // Observed live on Server14/18 at full utilisation. Power cap is informational
+  // only -- hitting the wall at full load is the card behaving as configured.
   assert.deepEqual(decodeThrottle(0x4, busy).reasons, ['功耗墙']);
-  assert.equal(decodeThrottle(0x4, busy).throttled, true);
+  assert.equal(decodeThrottle(0x4, busy).throttled, false);
   // Observed live on Server19 GPU1/2/3/5/6 -- running at 930 MHz of 3105.
   assert.deepEqual(decodeThrottle(0x20, busy).reasons, ['热降频']);
   assert.equal(decodeThrottle(0x20, busy).throttled, true);
-  // Several reasons at once is normal.
+  // Several reasons at once is normal. Thermal still counts as throttled even
+  // when the power-cap bit is also set.
   assert.deepEqual(decodeThrottle(0x24, busy).reasons, ['功耗墙', '热降频']);
+  assert.equal(decodeThrottle(0x24, busy).throttled, true);
 
   // An idle card downclocks by design: the GpuIdle bit is not a fault, and a
   // machine that is simply not being used must not raise a throttle warning.
@@ -1175,20 +1178,19 @@ test('an unreadable throttle mask is null, never a silent "not throttled"', () =
   }
 });
 
-test('throttle warnings separate thermal from power capping', () => {
+test('throttle warnings report thermal only, never power capping', () => {
   const gpus = (masks) =>
     masks.map((m, i) => ({ index: i, throttleMask: m, nProcs: 1, util: 99 }));
 
   // Idle cards raise nothing, however many there are.
   assert.deepEqual(throttleWarnings({ gpus: gpus([1, 1, 1, 1]) }), []);
-  // The Server19 case: five thermal, three power-capped.
+  // The Server19 case: five thermal, three power-capped. Only the thermal
+  // cards are warned about -- power cap is the card behaving as configured.
   assert.deepEqual(throttleWarnings({ gpus: gpus([0x20, 0x20, 0x20, 0x4, 0x4, 0x20, 0x20, 0x4]) }), [
     'throttled:5/8_thermal',
-    'throttled:3/8_power_cap',
   ]);
-  // A power cap at full utilisation is the card behaving as configured, so it
-  // is reported but never counted as thermal.
-  assert.deepEqual(throttleWarnings({ gpus: gpus([4, 4]) }), ['throttled:2/2_power_cap']);
+  // Power cap alone raises nothing.
+  assert.deepEqual(throttleWarnings({ gpus: gpus([4, 4]) }), []);
   assert.deepEqual(throttleWarnings({ gpus: gpus([0, 0]) }), []);
   // Cards that never reported a mask contribute nothing rather than a false 0.
   assert.deepEqual(throttleWarnings({ gpus: gpus([null, null]) }), []);
