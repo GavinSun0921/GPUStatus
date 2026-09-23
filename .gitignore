@@ -36,6 +36,11 @@ web/dist-ssr/
 # React frontend; the root one holds the optional screenshot tool.
 node_modules/
 
+# ------------------------------------------------------- agent scratch -------
+# Free workspace for agents (and humans): temp files, experiments, dumps.
+# Never commit anything from here. See AGENTS.md.
+agent_playground/
+
 # ------------------------------------------------------- logs and editors ----
 *.log
 npm-debug.log*
