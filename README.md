@@ -126,7 +126,7 @@ npm --prefix web run dev         # Vite，自动代理 /api 到 8787
     "NVIDIA GeForce RTX 3090": 1.2,   // 键必须是 nvidia-smi 原始名
     "NVIDIA L40": 3,
     "NVIDIA RTX 5880 Ada Generation": 3,
-    "NVIDIA RTX 6000D": 10
+    "NVIDIA RTX 6000D": 7
   }
 }
 ```
