@@ -197,6 +197,79 @@ test('aggregateUserUsage treats missing SM as zero rather than NaN', () => {
   assert.ok(Number.isFinite(carol.smSum));
 });
 
+test('a sole-occupant card reports the card util, not the diluted process-SM sum', () => {
+  // Parallel task on one card: one real GPU worker plus companion processes
+  // that hold a CUDA context and never compute. pmon under-attributes SM
+  // (observed on gpu16 GPU0: util=70 while the two process SMs summed to 38),
+  // so the card's utilization.gpu is the figure that says how busy it was.
+  const procs = [
+    { username: 'sunguodong', gpuIndex: 0, usedMemMib: 16492, smPct: 38 },
+    { username: 'sunguodong', gpuIndex: 0, usedMemMib: 386, smPct: 0 },
+    { username: 'sunguodong', gpuIndex: 0, usedMemMib: 386, smPct: 0 },
+    { username: 'sunguodong', gpuIndex: 0, usedMemMib: 386, smPct: 0 },
+  ];
+  const [u] = aggregateUserUsage(procs, [{ index: 0, util: 70 }]);
+  assert.equal(u.gpus, 1, 'four processes on one card is still one GPU');
+  assert.equal(u.procCount, 4);
+  assert.equal(u.smSum, 70, 'companion processes must not understate the card');
+  assert.equal(u.smGpus, 1);
+});
+
+test('process SM still wins when it is higher than the card util', () => {
+  // Bursty kernels can show up in pmon's SM window while utilization.gpu
+  // samples 0. Never understate in that direction either.
+  const procs = [
+    { username: 'w', gpuIndex: 0, usedMemMib: 100, smPct: 25 },
+  ];
+  const [u] = aggregateUserUsage(procs, [{ index: 0, util: 0 }]);
+  assert.equal(u.smSum, 25);
+});
+
+test('card util is the sole reading when every process SM is unreadable', () => {
+  // The repair path's premise: the card knows how busy it was even when pmon
+  // reported nothing (driver 535 column mismatch).
+  const procs = [
+    { username: 'w', gpuIndex: 0, usedMemMib: 100, smPct: null },
+    { username: 'w', gpuIndex: 1, usedMemMib: 100, smPct: null },
+  ];
+  const [u] = aggregateUserUsage(procs, [
+    { index: 0, util: 84 },
+    { index: 1, util: null },
+  ]);
+  assert.equal(u.smSum, 84, 'a null card util is not a measurement of idle');
+  assert.equal(u.smGpus, 1, 'only the card that reported counts');
+});
+
+test('an unreadable process SM with a zero card util is not invented as idle', () => {
+  // pmon missed AND utilization.gpu read 0. With no process reading, 0 is
+  // indistinguishable from a poll that landed between bursts.
+  const procs = [{ username: 'w', gpuIndex: 0, usedMemMib: 100, smPct: null }];
+  const [u] = aggregateUserUsage(procs, [{ index: 0, util: 0 }]);
+  assert.equal(u.smGpus, 0);
+  assert.equal(u.smSum, 0);
+});
+
+test('shared cards still split by process SM so one user cannot claim the whole card', () => {
+  const procs = [
+    { username: 'alice', gpuIndex: 0, usedMemMib: 100, smPct: 40 },
+    { username: 'bob', gpuIndex: 0, usedMemMib: 100, smPct: 30 },
+  ];
+  const gpus = [{ index: 0, util: 95 }];
+  const [alice, bob] = aggregateUserUsage(procs, gpus);
+  assert.equal(alice.smSum, 40);
+  assert.equal(bob.smSum, 30);
+});
+
+test('without gpus the fallback is still the process-SM sum', () => {
+  // Callers that only have process rows (and the older tests) must not change.
+  const procs = [
+    { username: 'w', gpuIndex: 0, usedMemMib: 10, smPct: 38 },
+    { username: 'w', gpuIndex: 0, usedMemMib: 10, smPct: 0 },
+  ];
+  const [u] = aggregateUserUsage(procs);
+  assert.equal(u.smSum, 38);
+});
+
 // -------------------------------------------------- state host naming ------
 
 /** Minimal successful result carrying just the fields naming depends on. */

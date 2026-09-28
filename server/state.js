@@ -449,7 +449,7 @@ export class State {
       // average over time instead of one instantaneous sample. See
       // USER_SM_WINDOW_MS.
       entry.userSm = entry.userSm ?? new Map();
-      for (const u of aggregateUserUsage(result.sample.procs ?? [])) {
+      for (const u of aggregateUserUsage(result.sample.procs ?? [], result.sample.gpus)) {
         // A sample with no readable utilisation contributes nothing; appending
         // it as a zero would reintroduce the bug this window exists to fix.
         if (u.smGpus === 0) continue;
@@ -603,7 +603,7 @@ export class State {
   #hostUsers(entry) {
     const latest = entry.latest;
     if (!latest) return [];
-    return aggregateUserUsage(latest.procs)
+    return aggregateUserUsage(latest.procs, latest.gpus)
       .map((u) => {
         const procs = latest.procs.filter((p) => p.username === u.username);
         const gpuSet = [...new Set(procs.map((p) => p.gpuIndex).filter((i) => i !== null))].sort(

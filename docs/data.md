@@ -28,6 +28,8 @@
 | `sm_gpu_seconds` | 有效 GPU 时 | SM 利用率对时间积分；共享卡按 100% 封顶 |
 | `mem_mib_seconds` | 显存积分 | 容量压力 |
 
+- **利用率归因**：单用户独占一张卡时，该卡的利用率取卡级 `utilization.gpu` 与进程 SM 的较大者——并行任务会把不计算的伴随进程留在卡上，pmon 进程 SM 求和会低估（实测 gpu16 GPU0：卡 70% 而两进程 SM 合计 38%）。共享卡仍按各用户进程 SM 切片、单用户封顶 100%。进程 SM 读不到且卡级 util 也是 0 时**不计入**样本（0 与「落在爆发间隙」无法区分）；进程 SM 读不到但卡级 util > 0 时用卡级值。
+
 - **写入时累计**进 `usage_rollup` / `host_hourly` / `usage_peak`，**永不清理**；原始 `*_sample` 按 `raw_retention_hours` 清理。
 - 每样本最多计入 `2 × interval`；停机间隙不补记。
 - 「同时使用峰值」跨机器，存 `usage_peak`（单机 `MAX(peak_gpus)` 会少算）。用量 UI 可不展示，但后端继续累计。

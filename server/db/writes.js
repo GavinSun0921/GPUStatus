@@ -206,7 +206,7 @@ export function recordSuccess(db, stmt, prevTs, intervalMs, hostId, sample) {
 
     if (dtS > 0) {
       const bucketTs = Math.floor(ts / HOUR_MS) * HOUR_MS;
-      for (const u of aggregateUserUsage(procs)) {
+      for (const u of aggregateUserUsage(procs, gpus)) {
         stmt.upsertRollup.run(
           bucketTs, hostId, u.username,
           u.gpus * dtS,
