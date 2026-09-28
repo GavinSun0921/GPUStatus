@@ -930,7 +930,11 @@ export function ProcTable({ gpu }: { gpu: Gpu }) {
       // Cumulative occupancy cost of this process: elapsed card-time x the
       // model rate. Shared cards count each process separately -- a rough
       // research-compute indicator, not a bill. Unpriced models stay 未定价.
-      title: '累计成本',
+      title: (
+        <Tooltip title="按进程运行时长估算,不等于账单,同卡多进程不重复计费。正式占用成本见「用量」页。">
+          <span style={{ borderBottom: '1px dotted currentColor', cursor: 'help' }}>累计成本</span>
+        </Tooltip>
+      ),
       dataIndex: 'cost_yuan',
       width: 100,
       align: 'right',
