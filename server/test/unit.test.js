@@ -1811,3 +1811,165 @@ test('an hour that genuinely read 0% is not mistaken for a lost one', () => {
   assert.equal(count, 0, 'an hour with a genuine 0% reading was flagged as lost');
   db.close();
 });
+
+test('retained hours are rewritten so companion processes no longer understate SM', () => {
+  // Parallel task on one card: one real worker at 38% plus a context-only
+  // process at 0%, while the card itself reports 70%. The old rollup wrote
+  // 38% of the card-seconds; the repair must restore the card figure.
+  const dir = mkdtempSync(join(tmpdir(), 'gpus-smint-'));
+  const path = join(dir, 'x.db');
+  new Db(path).close();
+
+  const hour = 1_700_000_000_000 - (1_700_000_000_000 % 3600000);
+  const next = hour + 3600000;
+  const db = new Db(path, { intervalMs: 5000 });
+  const insProc = db.db.prepare(
+    'INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct) VALUES (?,?,?,?,?,?,?,?,?)',
+  );
+  const insGpu = db.db.prepare(
+    `INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
+       mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
+       throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate, bus_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insRow = (ts, sm, util) => {
+    insGpu.run(ts, 'gpu16', 0, 'GPU-a', 'X', util, 1000, 24000, 0, 50, 150, 30, 2, 0, 1000, 2000, 300, 'P2', '00:00.0');
+    insProc.run(ts, 'gpu16', 0, 'GPU-a', 1, 'sunguodong', 'python', 16492, sm);
+    insProc.run(ts, 'gpu16', 0, 'GPU-a', 2, 'sunguodong', 'python', 386, 0);
+  };
+
+  // Oldest sample sits late in hour H, so hour H is partial and must be left
+  // alone. The two polls 5s apart in hour H+1 are the ones to rewrite -- their
+  // dt credits (10s + 5s) match what the live writer would have written.
+  insRow(hour + 3_595_000, 38, 70);
+  insRow(next + 5_000, 38, 70);
+  insRow(next + 10_000, 38, 70);
+
+  // What the old formula stored: 38% of 15 card-seconds.
+  db.db
+    .prepare(
+      `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+         sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(next, 'gpu16', 'sunguodong', 15, 5.7, 0, 1, 0, 2);
+
+  db.setMeta('repair_sole_card_util_v1', '');
+  db.close();
+
+  const repaired = new Db(path, { intervalMs: 5000 });
+  assert.equal(repaired.repairedSmIntegralRows, 1, 'the understated hour was not rewritten');
+  const row = repaired.db
+    .prepare('SELECT gpu_seconds, sm_gpu_seconds FROM usage_rollup WHERE username = ?')
+    .get('sunguodong');
+  assert.equal(row.gpu_seconds, 15, 'occupancy must not change');
+  assert.ok(
+    Math.abs(row.sm_gpu_seconds - 10.5) < 0.01,
+    `expected 70% x 15s = 10.5 effective seconds, got ${row.sm_gpu_seconds}`,
+  );
+  repaired.close();
+});
+
+test('the hour that only partially survives in raw samples is left alone', () => {
+  // Overwriting a partial hour would drop the credits from samples that have
+  // already been pruned -- a guess, not a measurement.
+  const dir = mkdtempSync(join(tmpdir(), 'gpus-smpartial-'));
+  const path = join(dir, 'x.db');
+  new Db(path).close();
+
+  const hour = 1_700_000_000_000 - (1_700_000_000_000 % 3600000);
+  const next = hour + 3600000;
+  const db = new Db(path, { intervalMs: 5000 });
+  const insProc = db.db.prepare(
+    'INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct) VALUES (?,?,?,?,?,?,?,?,?)',
+  );
+  const insGpu = db.db.prepare(
+    `INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
+       mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
+       throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate, bus_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insRow = (ts, sm, util) => {
+    insGpu.run(ts, 'gpu16', 0, 'GPU-a', 'X', util, 100, 1000, 0, 50, 100, 30, 1, 0, 1000, 2000, 300, 'P2', '00:00.0');
+    insProc.run(ts, 'gpu16', 0, 'GPU-a', 1, 'alice', 'python', 100, sm);
+  };
+
+  // Oldest surviving sample is late in hour H, so hour H is partial.
+  insRow(hour + 3_595_000, 50, 50);
+  // A full next hour, which the repair may rewrite.
+  insRow(next + 5_000, 50, 80);
+  insRow(next + 10_000, 50, 80);
+
+  const insRoll = db.db.prepare(
+    `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+       sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  // The partial hour's stored value includes ~10 minutes we can no longer see.
+  insRoll.run(hour, 'gpu16', 'alice', 3600, 1800, 0, 1, 0, 100);
+  insRoll.run(next, 'gpu16', 'alice', 15, 7.5, 0, 1, 0, 2);
+
+  db.setMeta('repair_sole_card_util_v1', '');
+  db.close();
+
+  const repaired = new Db(path, { intervalMs: 5000 });
+  const rows = repaired.db
+    .prepare('SELECT bucket_ts, sm_gpu_seconds FROM usage_rollup WHERE username = ? ORDER BY bucket_ts')
+    .all('alice');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].bucket_ts, hour);
+  assert.equal(rows[0].sm_gpu_seconds, 1800, 'the partial hour must keep its stored integral');
+  assert.ok(
+    Math.abs(rows[1].sm_gpu_seconds - 12) < 0.01,
+    `expected 80% x 15s = 12 for the complete hour, got ${rows[1].sm_gpu_seconds}`,
+  );
+  repaired.close();
+});
+
+test('shared cards still split by process SM after the integral repair', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gpus-smshared-'));
+  const path = join(dir, 'x.db');
+  new Db(path).close();
+
+  const hour = 1_700_000_000_000 - (1_700_000_000_000 % 3600000);
+  const next = hour + 3600000;
+  const db = new Db(path, { intervalMs: 5000 });
+  const insProc = db.db.prepare(
+    'INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct) VALUES (?,?,?,?,?,?,?,?,?)',
+  );
+  const insGpu = db.db.prepare(
+    `INSERT INTO gpu_sample (ts, host_id, gpu_index, gpu_uuid, gpu_name, util_pct,
+       mem_used_mib, mem_total_mib, mem_util_pct, temp_c, power_w, fan_pct, n_procs,
+       throttle_mask, sm_clock_mhz, sm_clock_max_mhz, power_limit_w, pstate, bus_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insRow = (ts) => {
+    insGpu.run(ts, 'gpu16', 0, 'GPU-a', 'X', 95, 100, 1000, 0, 50, 100, 30, 2, 0, 1000, 2000, 300, 'P2', '00:00.0');
+    insProc.run(ts, 'gpu16', 0, 'GPU-a', 1, 'alice', 'python', 100, 40);
+    insProc.run(ts, 'gpu16', 0, 'GPU-a', 2, 'bob', 'python', 100, 30);
+  };
+
+  insRow(hour + 3_595_000);
+  insRow(next + 5_000);
+  insRow(next + 10_000);
+
+  const insRoll = db.db.prepare(
+    `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+       sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  insRoll.run(next, 'gpu16', 'alice', 15, 6, 0, 1, 0, 2);
+  insRoll.run(next, 'gpu16', 'bob', 15, 4.5, 0, 1, 0, 2);
+
+  db.setMeta('repair_sole_card_util_v1', '');
+  db.close();
+
+  const repaired = new Db(path, { intervalMs: 5000 });
+  const rows = repaired.db
+    .prepare('SELECT username, sm_gpu_seconds FROM usage_rollup ORDER BY username')
+    .all();
+  // 15s at 40% and 30% respectively -- not the card's 95%.
+  assert.ok(Math.abs(rows.find((r) => r.username === 'alice').sm_gpu_seconds - 6) < 0.01);
+  assert.ok(Math.abs(rows.find((r) => r.username === 'bob').sm_gpu_seconds - 4.5) < 0.01);
+  repaired.close();
+});

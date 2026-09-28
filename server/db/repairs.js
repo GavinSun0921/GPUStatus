@@ -7,7 +7,7 @@
  * unconditionally on every boot.
  */
 
-import { HOUR_MS, THROTTLE_BAD_BITS } from './helpers.js';
+import { HOUR_MS, THROTTLE_BAD_BITS, aggregateUserUsage } from './helpers.js';
 
 /**
  * Fill `hosts.gpu_name` from the newest raw GPU sample still on disk.
@@ -360,5 +360,155 @@ export function repairLostProcessSm(db, getMeta, setMeta) {
   }
 
   setMeta('repair_pmon_sm_v1', String(Date.now()));
+  return repaired;
+}
+
+/**
+ * Rewrite `sm_gpu_seconds` for every hour still covered by raw samples, using
+ * the current sole-occupant card-util attribution.
+ *
+ * The older per-process-SM sum understated a user's utilisation whenever a
+ * parallel task parked companion processes on a card they never computed on:
+ * pmon then attributes almost nothing to the card even though `utilization.gpu`
+ * says it was busy (observed on gpu16 GPU0: card 70%, two process SMs summing
+ * to 38%). `aggregateUserUsage` now takes the card's util when a single user
+ * holds the card; this repair replays the retained samples through that rule so
+ * the permanent accounting matches what new writes produce.
+ *
+ * Only COMPLETE hours whose samples are still on disk are rewritten. Hours
+ * before the oldest surviving sample keep whatever the live writer accumulated
+ * -- overwriting them with a partial integral would drop the unseen part, and
+ * the project rule is that a repair writes measurements, never a guess.
+ * `gpu_seconds` and `mem_mib_seconds` are untouched: they never depended on SM.
+ *
+ * @returns {number} rollup rows rewritten (0 when nothing needed repair)
+ */
+export function repairUnderstatedSm(db, getMeta, setMeta, intervalMs = 5000) {
+  if (getMeta('repair_sole_card_util_v1')) return 0;
+
+  db.exec('PRAGMA temp_store = MEMORY');
+
+  const oldest = db
+    .prepare(
+      `SELECT MIN(ts) AS t FROM (
+         SELECT ts FROM proc_sample
+         UNION ALL
+         SELECT ts FROM gpu_sample
+       )`,
+    )
+    .get().t;
+  if (oldest == null) {
+    setMeta('repair_sole_card_util_v1', String(Date.now()));
+    return 0;
+  }
+
+  // The hour that contains the oldest surviving sample is partial: credits
+  // that landed before it are gone. Skip that bucket entirely.
+  const firstBucket = Math.floor(oldest / HOUR_MS) * HOUR_MS + HOUR_MS;
+
+  const hosts = db
+    .prepare(
+      `SELECT DISTINCT host_id FROM (
+         SELECT host_id FROM proc_sample WHERE ts >= ?
+         UNION
+         SELECT host_id FROM gpu_sample WHERE ts >= ?
+       )`,
+    )
+    .all(oldest, oldest)
+    .map((r) => r.host_id);
+
+  const qTs = db.prepare(
+    `SELECT DISTINCT ts FROM (
+       SELECT ts FROM gpu_sample WHERE host_id = ? AND ts >= ?
+       UNION
+       SELECT ts FROM proc_sample WHERE host_id = ? AND ts >= ?
+     ) ORDER BY ts`,
+  );
+  const qProc = db.prepare(
+    `SELECT ts,
+            gpu_index      AS gpuIndex,
+            username,
+            used_mem_mib   AS usedMemMib,
+            sm_pct         AS smPct
+       FROM proc_sample
+      WHERE host_id = ? AND ts >= ?
+      ORDER BY ts`,
+  );
+  const qGpu = db.prepare(
+    `SELECT ts, gpu_index AS [index], util_pct AS util
+       FROM gpu_sample
+      WHERE host_id = ? AND ts >= ?
+      ORDER BY ts`,
+  );
+  const upd = db.prepare(
+    `UPDATE usage_rollup
+        SET sm_gpu_seconds = ?
+      WHERE bucket_ts = ? AND host_id = ? AND username = ?
+        AND bucket_ts >= ?`,
+  );
+
+  let repaired = 0;
+  db.exec('BEGIN');
+  try {
+    for (const hostId of hosts) {
+      const stamps = qTs.all(hostId, oldest, hostId, oldest).map((r) => r.ts);
+      if (stamps.length === 0) continue;
+
+      const procsByTs = new Map();
+      for (const p of qProc.all(hostId, oldest)) {
+        let list = procsByTs.get(p.ts);
+        if (!list) {
+          list = [];
+          procsByTs.set(p.ts, list);
+        }
+        list.push(p);
+      }
+      const gpusByTs = new Map();
+      for (const g of qGpu.all(hostId, oldest)) {
+        let list = gpusByTs.get(g.ts);
+        if (!list) {
+          list = [];
+          gpusByTs.set(g.ts, list);
+        }
+        list.push(g);
+      }
+
+      // Same dt rule as the live writer (writes.js recordSuccess): credit at
+      // most two nominal intervals, and a gap is credited as one, never
+      // back-filled as if the cards had been busy the whole time.
+      const acc = new Map();
+      let prev = null;
+      for (const ts of stamps) {
+        let dtMs = prev == null ? 0 : ts - prev;
+        if (!Number.isFinite(dtMs) || dtMs < 0) dtMs = 0;
+        if (dtMs > intervalMs * 2) dtMs = intervalMs;
+        prev = ts;
+        const dtS = dtMs / 1000;
+        if (dtS <= 0) continue;
+
+        const bucket = Math.floor(ts / HOUR_MS) * HOUR_MS;
+        if (bucket < firstBucket) continue;
+
+        for (const u of aggregateUserUsage(procsByTs.get(ts) ?? [], gpusByTs.get(ts) ?? [])) {
+          const key = bucket + '\u0000' + u.username;
+          acc.set(key, (acc.get(key) ?? 0) + (u.smSum / 100) * dtS);
+        }
+      }
+
+      for (const [key, secs] of acc) {
+        const sep = key.indexOf('\u0000');
+        const bucket = Number(key.slice(0, sep));
+        const username = key.slice(sep + 1);
+        const r = upd.run(secs, bucket, hostId, username, firstBucket);
+        repaired += r.changes;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  setMeta('repair_sole_card_util_v1', String(Date.now()));
   return repaired;
 }

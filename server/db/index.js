@@ -34,6 +34,7 @@ import {
   backfillUsagePeak,
   repairLostProcessSm,
   repairTruncatedUsernames,
+  repairUnderstatedSm,
 } from './repairs.js';
 import * as q from './queries.js';
 import { createStatements } from './statements.js';
@@ -70,6 +71,14 @@ export class Db {
       this.db,
       (k) => this.getMeta(k),
       (k, v) => this.setMeta(k, v),
+    );
+    // After repairLostProcessSm so this repair wins on hours both touch: it
+    // replays the per-sample integral under the current attribution rule.
+    this.repairedSmIntegralRows = repairUnderstatedSm(
+      this.db,
+      (k) => this.getMeta(k),
+      (k, v) => this.setMeta(k, v),
+      this.intervalMs,
     );
 
     const backfilled = backfillHostHourly(this.db);
