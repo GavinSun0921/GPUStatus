@@ -40,34 +40,92 @@ function parseSnapshot(raw: unknown): Snapshot | null {
  * "updated 3s ago" stays correct even if the browser's clock is off.
  *
  * A local 1s ticker re-renders ages between pushes without any extra requests.
+ *
+ * A background tab used to collect every poll push and then fire them all when
+ * the tab came back, so the dashboard looked like a high-speed replay of
+ * everything that happened while it was hidden. The intermediate states are
+ * not something anyone needs -- the server already records history. Two rules
+ * keep the view meaning "now" only:
+ *   1. SSE frames are coalesced through requestAnimationFrame, so only the
+ *      newest pending snapshot is ever applied. A hidden tab does not run
+ *      frames, so a backlog simply keeps overwriting one slot and the first
+ *      frame after becoming visible shows the latest state once.
+ *   2. Becoming visible again fetches GET /api/snapshot directly, which also
+ *      covers a tab whose EventSource was dropped while hidden.
  */
 export function useSnapshot() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const offsetRef = useRef(0);
+  const pendingRef = useRef<Snapshot | null>(null);
+  const frameRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const source = new EventSource('/api/stream');
+    const apply = (data: Snapshot) => {
+      offsetRef.current = data.server_now - Date.now();
+      setSnapshot(data);
+      setConnected(true);
+      setNow(Date.now() + offsetRef.current);
+    };
+
+    const scheduleApply = () => {
+      if (frameRef.current != null) return;
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        const data = pendingRef.current;
+        pendingRef.current = null;
+        if (data) apply(data);
+      });
+    };
 
     const onSnapshot = (event: MessageEvent) => {
       try {
         const data = parseSnapshot(JSON.parse(event.data));
         if (!data) return; // reported by parseSnapshot; keep the last good view
-        offsetRef.current = data.server_now - Date.now();
-        setSnapshot(data);
-        setConnected(true);
+        pendingRef.current = data;
+        scheduleApply();
       } catch {
         // A frame that is not even JSON is ignored; the next push corrects it.
       }
     };
 
+    const source = new EventSource('/api/stream');
     source.addEventListener('snapshot', onSnapshot as EventListener);
     source.onopen = () => setConnected(true);
     // EventSource reconnects on its own; reflect the gap in the UI meanwhile.
     source.onerror = () => setConnected(false);
 
-    return () => source.close();
+    // Coming back to a hidden tab: jump straight to the present instead of
+    // playing back whatever queued up. The SSE stream stays open and will keep
+    // coalescing through the same pending slot.
+    let cancelled = false;
+    const refreshNow = () => {
+      if (document.visibilityState !== 'visible') return;
+      // Drop anything queued while hidden; the fetch below is strictly newer.
+      pendingRef.current = null;
+      fetch('/api/snapshot')
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+        .then((raw: unknown) => {
+          if (cancelled) return;
+          const data = parseSnapshot(raw);
+          if (data) apply(data);
+        })
+        .catch(() => {
+          // A failed refresh keeps the last good view; the SSE stream will
+          // correct it on the next poll.
+        });
+    };
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
+
+    return () => {
+      cancelled = true;
+      if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
+      source.close();
+    };
   }, []);
 
   useEffect(() => {
