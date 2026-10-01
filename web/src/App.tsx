@@ -4,6 +4,7 @@ import zhCN from 'antd/locale/zh_CN';
 
 import { useSnapshot } from './api';
 import { useTheme, type ThemeMode } from './theme';
+import { AccessGate } from './components/AccessGate';
 import { Overview } from './components/Overview';
 import { EventsView, UsageView, UsersView } from './components/Reports';
 import { RatesView } from './components/RatesView';
@@ -88,7 +89,9 @@ export default function App() {
         token: { borderRadius: 8, fontSize: 13, wireframe: false },
       }}
     >
-      <Shell mode={mode} setMode={setMode} />
+      <AccessGate>
+        <Shell mode={mode} setMode={setMode} />
+      </AccessGate>
     </ConfigProvider>
   );
 }

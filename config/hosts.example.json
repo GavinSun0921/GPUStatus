@@ -82,6 +82,12 @@
     "session_hours": 12
   },
 
+  // Site-wide entry password: nothing is visible until this is entered.
+  // Same fields and rules as "admin". Leave BOTH unset for an open dashboard.
+  "access": {
+    "session_hours": 72
+  },
+
   "hosts": [
     {
       "id": "gpu01",

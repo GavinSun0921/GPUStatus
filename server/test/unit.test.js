@@ -11,7 +11,7 @@ import { Db, aggregateUserUsage, occupancyCost } from '../db/index.js';
 import { loadPrices, priceOfGpuName } from '../prices.js';
 import { State, decodeThrottle, displayGpuName, gpuCountWarning, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
-import { Auth, parseCookies } from '../auth.js';
+import { Auth, parseCookies, ACCESS_COOKIE } from '../auth.js';
 import { AdminConfigSchema } from '../../shared/schema.ts';
 // --------------------------------------------------------------- config -----
 
@@ -704,6 +704,28 @@ test('cookies parse and the session cookie is HttpOnly', () => {
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
   assert.match(cookie, /Path=\//);
+  assert.match(cookie, /^gpustatus_admin=/);
+});
+
+test('the access gate uses its own cookie name and rejects admin tokens', () => {
+  // One secret signs both roles (it lives in the database), so the cookie NAME
+  // is mixed into the HMAC: a stolen admin cookie must not open the site gate.
+  const admin = authWith({ password: 'x' }, 'shared-secret');
+  const access = new Auth(
+    { sessionHours: 12, password: 'y', passwordSha256: null },
+    'shared-secret',
+    ACCESS_COOKIE,
+  );
+
+  assert.match(access.sessionCookie('tok'), /^gpustatus_access=/);
+  assert.match(access.clearCookie(), /^gpustatus_access=;/);
+
+  const adminToken = admin.issueToken(1_000_000);
+  const accessToken = access.issueToken(1_000_000);
+  assert.equal(access.verifyToken(adminToken, 1_000_000), false, 'admin token opened the site gate');
+  assert.equal(admin.verifyToken(accessToken, 1_000_000), false, 'access token opened the admin page');
+  assert.equal(access.verifyToken(accessToken, 1_000_000), true);
+  assert.equal(admin.verifyToken(adminToken, 1_000_000), true);
 });
 
 // ------------------------------------------------- config serialisation ------
@@ -735,6 +757,7 @@ test('serialising without a password does NOT invent one', () => {
   const noPassword = {
     ...config,
     admin: { password: null, passwordSha256: null, sessionHours: 12 },
+    access: { password: null, passwordSha256: null, sessionHours: 72 },
   };
   const text = serializeConfig(noPassword);
 
@@ -758,6 +781,34 @@ test('serialising without a password does NOT invent one', () => {
       false,
       'reloaded config unexpectedly has a password',
     );
+    assert.equal(
+      Boolean(reloaded.access.password || reloaded.access.passwordSha256),
+      false,
+      'reloaded config unexpectedly has an access password',
+    );
+  } finally {
+    rmSync(path, { force: true });
+  }
+});
+
+test('the access password round-trips through the serialiser', () => {
+  // An admin-page save rewrites the whole file. If `access` were dropped, the
+  // site would silently re-open to the campus network on the next save.
+  const config = loadConfig();
+  const withAccess = {
+    ...config,
+    access: { password: null, passwordSha256: SHA_TEST, sessionHours: 48 },
+  };
+  const text = serializeConfig(withAccess);
+  assert.ok(text.includes(SHA_TEST), 'access digest was not written');
+
+  const path = join(tmpdir(), `gpustatus-access-${process.pid}.json`);
+  try {
+    writeFileSync(path, text, 'utf8');
+    const reloaded = loadConfig(path);
+    assert.equal(reloaded.access.passwordSha256, SHA_TEST);
+    assert.equal(reloaded.access.sessionHours, 48);
+    assert.equal(reloaded.access.password, null);
   } finally {
     rmSync(path, { force: true });
   }

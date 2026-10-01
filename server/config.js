@@ -185,6 +185,16 @@ export function serializeConfig(config) {
     adminBlock = `    "password": ${j(config.admin.password)},\n`;
   }
 
+  // Same rules as admin: never invent a default password, and re-emit whichever
+  // form the operator wrote so a save does not swap a digest for plaintext.
+  const access = config.access ?? { password: null, passwordSha256: null, sessionHours: 72 };
+  let accessBlock = '';
+  if (access.passwordSha256) {
+    accessBlock = `    "password_sha256": ${j(access.passwordSha256)},\n`;
+  } else if (access.password) {
+    accessBlock = `    "password": ${j(access.password)},\n`;
+  }
+
   return `{
   // ===========================================================================
   //  GPUStatus configuration
@@ -269,6 +279,12 @@ export function serializeConfig(config) {
 ${adminBlock}    "session_hours": ${config.admin.sessionHours}
   },
 
+  // Site-wide entry password: nothing is visible until this is entered.
+  // Same fields and rules as "admin". Leave BOTH unset for an open dashboard.
+  "access": {
+${accessBlock}    "session_hours": ${access.sessionHours}
+  },
+
   "hosts": [
 ${hostBlocks.join(',\n')}
   ]
@@ -330,6 +346,7 @@ export function loadConfig(configPath) {
   const db = parsed.db ?? {};
   const naming = parsed.naming ?? {};
   const admin = parsed.admin ?? {};
+  const access = parsed.access ?? {};
 
   // Mount points never worth reporting, overridable but defaulted.
   //
@@ -471,6 +488,12 @@ export function loadConfig(configPath) {
       password: admin.password ? String(admin.password) : null,
       passwordSha256: admin.password_sha256 ? String(admin.password_sha256).toLowerCase() : null,
       sessionHours: withDefault(admin.session_hours, 12),
+    },
+    // Site-wide gate. Absent/unset keeps the dashboard open to the network.
+    access: {
+      password: access.password ? String(access.password) : null,
+      passwordSha256: access.password_sha256 ? String(access.password_sha256).toLowerCase() : null,
+      sessionHours: withDefault(access.session_hours, 72),
     },
     hosts,
   };

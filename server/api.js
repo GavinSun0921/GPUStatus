@@ -9,7 +9,9 @@ import { createHash } from 'node:crypto';
  * intranet-facing by design).
  *
  * Everything under `/api/admin/*` except login/session requires a valid session
- * cookie -- see auth.js.
+ * cookie -- see auth.js. When an `access` password is configured, every other
+ * `/api/*` endpoint (including the SSE stream) likewise requires the site
+ * cookie; only `/api/access/*` is reachable without it.
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -19,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { loadConfig, serializeConfig } from './config.js';
 import { occupancyCost } from './db/index.js';
 import { priceOfGpuName } from './prices.js';
-import { SESSION_COOKIE, parseCookies } from './auth.js';
+import { SESSION_COOKIE, ACCESS_COOKIE, parseCookies } from './auth.js';
 
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -236,6 +238,7 @@ function saveConfig(config, editable) {
     ssh: config.ssh,
     db: config.db,
     admin: config.admin,
+    access: config.access,
     raw: config.raw,
     poll: {
       intervalMs: Number(editable.poll?.interval_ms ?? config.poll.intervalMs),
@@ -314,6 +317,77 @@ export function createApi(app) {
       });
       res.end();
       return true;
+    }
+
+    // ------------------------------------------------------------- access ---
+    // Site-wide gate. These three routes are the only unauthenticated surface
+    // when a password is configured; the dashboard itself is useless without
+    // the cookie, which is the point.
+    if (pathname.startsWith('/api/access/')) {
+      const cookies = parseCookies(req.headers.cookie);
+      const token = cookies[ACCESS_COOKIE];
+      const { accessAuth } = app;
+      const authenticated = accessAuth.enabled && accessAuth.verifyToken(token, now);
+      const ip = req.socket.remoteAddress ?? 'unknown';
+
+      if (pathname === '/api/access/session' && req.method === 'GET') {
+        // `authenticated` is true when the gate is OFF so the UI can skip the
+        // login form without a second round trip.
+        json(res, 200, {
+          enabled: accessAuth.enabled,
+          authenticated: accessAuth.enabled ? authenticated : true,
+          site: config().site ?? '',
+        });
+        return true;
+      }
+
+      if (pathname === '/api/access/login' && req.method === 'POST') {
+        if (!accessAuth.enabled) {
+          json(res, 503, { error: '未配置访问口令' });
+          return true;
+        }
+        if (accessAuth.isLockedOut(ip, now)) {
+          json(res, 429, { error: '尝试次数过多,请 15 分钟后再试' });
+          return true;
+        }
+
+        let body;
+        try {
+          body = await readJsonBody(req);
+        } catch (err) {
+          json(res, 400, { error: err.message });
+          return true;
+        }
+
+        if (!accessAuth.verifyPassword(body.password)) {
+          accessAuth.noteFailure(ip, now);
+          json(res, 401, { error: '口令错误' });
+          return true;
+        }
+
+        accessAuth.noteSuccess(ip);
+        json(res, 200, { ok: true }, { 'Set-Cookie': accessAuth.sessionCookie(accessAuth.issueToken(now)) });
+        return true;
+      }
+
+      if (pathname === '/api/access/logout' && req.method === 'POST') {
+        json(res, 200, { ok: true }, { 'Set-Cookie': accessAuth.clearCookie() });
+        return true;
+      }
+
+      json(res, 404, { error: 'not found' });
+      return true;
+    }
+
+    // Everything below needs the site gate when one is configured -- including
+    // admin and the SSE stream. A 401 is honest; a silent empty dashboard is not.
+    if (app.accessAuth.enabled) {
+      const cookies = parseCookies(req.headers.cookie);
+      const token = cookies[ACCESS_COOKIE];
+      if (!app.accessAuth.verifyToken(token, now)) {
+        json(res, 401, { error: '未登录或会话已过期' });
+        return true;
+      }
     }
 
     // ------------------------------------------------------------- admin ---

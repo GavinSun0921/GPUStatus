@@ -124,6 +124,14 @@ export const RawConfigSchema = z
         session_hours: intAtLeast(1).nullish(),
       })
       .nullish(),
+    /** Site-wide entry password. Absent = the dashboard is open to the network. */
+    access: z
+      .looseObject({
+        password: z.string({ error: 'password 必须是字符串' }).nullish(),
+        password_sha256: z.string({ error: 'password_sha256 必须是字符串' }).nullish(),
+        session_hours: intAtLeast(1).nullish(),
+      })
+      .nullish(),
     disk_exclude: z.array(z.string(), { error: '必须是挂载点数组' }).nullish(),
     gpu_names: z.record(z.string(), z.string(), {
       error: '必须是一个对象,把 nvidia-smi 的型号名映射到显示名',

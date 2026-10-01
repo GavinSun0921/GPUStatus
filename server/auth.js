@@ -1,10 +1,10 @@
 /**
- * Admin authentication.
+ * Shared-password authentication for the admin page and the site-wide gate.
  *
- * One shared password guards the configuration page. There is no user table:
- * the password lives in the config file and a signed, expiring cookie carries
- * the session. That is deliberately the smallest thing that is still not
- * obviously wrong.
+ * One shared password; there is no user table: the password lives in the config
+ * file and a signed, expiring cookie carries the session. That is deliberately
+ * the smallest thing that is still not obviously wrong. The site gate and the
+ * admin page are separate instances (separate passwords, separate cookies).
  *
  *   * The token is `<expiryMs>.<hmac>` -- no server-side session store, and
  *     tampering with the expiry invalidates the signature.
@@ -22,6 +22,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const SESSION_COOKIE = 'gpustatus_admin';
+export const ACCESS_COOKIE = 'gpustatus_access';
 
 const MAX_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
@@ -44,9 +45,16 @@ export function parseCookies(header) {
 }
 
 export class Auth {
-  constructor(adminConfig, secret) {
-    this.config = adminConfig;
+  /**
+   * @param {{password?: string|null, passwordSha256?: string|null, sessionHours?: number}} config
+   * @param {string} secret HMAC key for session tokens
+   * @param {string} [cookieName] distinct per role so tokens cannot be swapped
+   *   between the site gate and the admin page (the name is mixed into the HMAC).
+   */
+  constructor(config, secret, cookieName = SESSION_COOKIE) {
+    this.config = config;
     this.secret = secret;
+    this.cookieName = cookieName;
     /** @type {Map<string, {count: number, firstAt: number}>} */
     this.failures = new Map();
   }
@@ -73,10 +81,14 @@ export class Auth {
     return timingSafeEqual(this.#digest(candidate), expected);
   }
 
+  /** Bind the role into the signature: an admin token must not open the site gate. */
+  #sign(expiry) {
+    return createHmac('sha256', this.secret).update(`${this.cookieName}:${expiry}`).digest('hex');
+  }
+
   issueToken(now = Date.now()) {
     const expiry = String(now + this.config.sessionHours * 3600 * 1000);
-    const signature = createHmac('sha256', this.secret).update(expiry).digest('hex');
-    return `${expiry}.${signature}`;
+    return `${expiry}.${this.#sign(expiry)}`;
   }
 
   verifyToken(token, now = Date.now()) {
@@ -101,10 +113,7 @@ export class Auth {
     // construction, so the lengths can never disagree.
     if (!/^[0-9a-f]{64}$/i.test(signature)) return false;
     const given = Buffer.from(signature, 'hex');
-    const expected = Buffer.from(
-      createHmac('sha256', this.secret).update(expiry).digest('hex'),
-      'hex',
-    );
+    const expected = Buffer.from(this.#sign(expiry), 'hex');
     if (!timingSafeEqual(given, expected)) return false;
 
     const expiresAt = Number(expiry);
@@ -138,13 +147,13 @@ export class Auth {
   /** Set-Cookie value for a successful login. */
   sessionCookie(token) {
     const maxAge = this.config.sessionHours * 3600;
-    // SameSite=Strict: the admin API is never called cross-site.
+    // SameSite=Strict: these APIs are never called cross-site.
     // `Secure` is omitted because the service is plain HTTP on an intranet;
     // adding it would stop the cookie being stored at all.
-    return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+    return `${this.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
   }
 
   clearCookie() {
-    return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
+    return `${this.cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
   }
 }

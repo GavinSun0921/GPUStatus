@@ -16,7 +16,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { loadConfig, resolveHostLabel } from './config.js';
 import { loadPrices, DEFAULT_PRICES_PATH } from './prices.js';
-import { Auth, generateSecret } from './auth.js';
+import { Auth, generateSecret, ACCESS_COOKIE } from './auth.js';
 import { Db } from './db/index.js';
 import { Collector } from './collector.js';
 import { State } from './state.js';
@@ -72,6 +72,8 @@ if (config.usingExample) {
 log(`hosts         ${config.hosts.map((h) => h.id).join(', ')}`);
 log(`poll          every ${config.poll.intervalMs}ms (timeout ${config.poll.timeoutMs}ms)`);
 log(`status        stale after ${config.poll.staleAfterMs}ms, down after ${config.poll.downAfterFailures} failures`);
+log(`access        ${config.access.password || config.access.passwordSha256 ? 'password required' : 'open (no access password)'}`);
+log(`admin         ${config.admin.password || config.admin.passwordSha256 ? 'password required' : 'disabled'}`);
 
 const db = new Db(config.db.path, { intervalMs: config.poll.intervalMs });
 db.registerHosts(config.hosts);
@@ -110,6 +112,8 @@ const app = {
   collector,
   state,
   auth: new Auth(config.admin, sessionSecret),
+  /** Site-wide entry gate; disabled (open dashboard) unless `access` is configured. */
+  accessAuth: new Auth(config.access, sessionSecret, ACCESS_COOKIE),
   reloadConfig: applyConfig,
   /** Current rate card; replaced wholesale on prices.json reload. */
   priceRates: priceBook.rates,
@@ -125,6 +129,7 @@ function applyConfig(next) {
   app.config = next;
   collector.config = next;
   app.auth = new Auth(next.admin, sessionSecret);
+  app.accessAuth = new Auth(next.access, sessionSecret, ACCESS_COOKIE);
 
   state.applyConfig(next);
   db.registerHosts(next.hosts);
