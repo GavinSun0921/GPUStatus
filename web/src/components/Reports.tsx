@@ -29,6 +29,12 @@ const RANGES = [
  */
 const USAGE_REFRESH_MS = 60 * 60 * 1000;
 
+/**
+ * Host accounts that occasionally hold a card (sudo, a service uid) but are
+ * not lab members. Their seconds stay in the rollup; the usage list is people.
+ */
+const HIDDEN_USAGE_USERS = new Set(['root', 'user']);
+
 export function UsageView() {
   const colors = useSeverityColors();
   const { token } = theme.useToken();
@@ -38,7 +44,7 @@ export function UsageView() {
     { refreshMs: USAGE_REFRESH_MS },
   );
 
-  const rows = data?.rows ?? [];
+  const rows = (data?.rows ?? []).filter((r) => !HIDDEN_USAGE_USERS.has(r.username));
 
   const columns: ColumnsType<UsageTotalsRow> = [
     { title: '用户', dataIndex: 'username', render: (u: string) => <Typography.Text strong>{u}</Typography.Text> },
