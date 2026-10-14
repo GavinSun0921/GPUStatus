@@ -17,6 +17,7 @@
 
 - 远程探针只读、单次 awk 解析（控制 fork 次数）。
 - **`ps` 用户名列必须带宽度**（`user:32=`）。多列 `ps` 默认 8 字符会把 `luzhicheng` 截成 `luzhich+`，账目会拆成两个人。
+- **容器进程按 user namespace 属主归户**。`ps` 对解不出名字的 UID 只会打印数字（rootless Docker 的 subuid，如 `1010000`），那不是用户。记账身份 = `uid_map` 里容器 uid `0` 映射到的宿主 UID（`0 1054 1` → `gaobowen`）；identity map 不改写。名字用 `ps`（走 NSS）解析，解不出保留数字，不猜。
 - **`pmon` 按表头列名定位**，不能硬编码列数（驱动 535=8 列，580/610=10 列）。
 - CPU 用两次采集的 `/proc/stat` 差值，不在目标机 sleep。
 

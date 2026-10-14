@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { deriveHostLabel, loadConfig, parseJsonc, resolveHostLabel, serializeConfig } from '../config.js';
 import { computeCpuPct, deriveSample, shellQuote } from '../collector.js';
 import { Db, aggregateUserUsage, occupancyCost } from '../db/index.js';
+import { repairContainerUids } from '../db/repairs.js';
 import { loadPrices, priceOfGpuName } from '../prices.js';
 import { State, decodeThrottle, displayGpuName, gpuCountWarning, thermalShare, throttleWarnings } from '../state.js';
 import { parseTime, publicAdminConfig } from '../api.js';
@@ -499,6 +500,51 @@ test('deriveSample joins uuid, pmon and pid_users into per-process rows', () => 
   assert.equal(sample.procs[0].smPct, 77);
   assert.equal(sample.gpus[0].nProcs, 1);
   assert.deepEqual(sample.warnings, []);
+});
+
+test('deriveSample attributes remapped-namespace processes to the ns owner', () => {
+  // Rootless Docker on gpu17: `ps` prints the host subuid (1010000) because
+  // NSS has no name for it. The accounting identity is the user-namespace
+  // owner (`uid_map` `0 1054 1` => gaobowen), not that number.
+  const raw = {
+    ts: Math.floor(Date.now() / 1000),
+    hostname: 'n1',
+    cpu: { ticks: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    mem: {},
+    gpus: [{ index: 0, uuid: 'GPU-a' }],
+    procs: [
+      { gpu_uuid: 'GPU-a', pid: 1, name: 'python', used_mem_mib: 10 },
+      { gpu_uuid: 'GPU-a', pid: 2, name: 'python', used_mem_mib: 20 },
+    ],
+    pid_users: [
+      { pid: 1, user: '1010000', ns_owner: 'gaobowen', elapsed_s: 30 },
+      { pid: 2, user: 'dave', ns_owner: null, elapsed_s: 5 },
+    ],
+    pmon: [],
+    errors: [],
+  };
+
+  const sample = deriveSample({ id: 'n1', expectGpus: 1 }, raw, null, Date.now());
+  assert.equal(sample.procs[0].username, 'gaobowen');
+  assert.equal(sample.procs[1].username, 'dave');
+});
+
+test('deriveSample keeps a bare numeric ps name when there is no ns owner', () => {
+  // Identity map: the number IS the host uid. No name to resolve is not a
+  // licence to invent one.
+  const raw = {
+    ts: Math.floor(Date.now() / 1000),
+    hostname: 'n1',
+    cpu: { ticks: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    mem: {},
+    gpus: [{ index: 0, uuid: 'GPU-a' }],
+    procs: [{ gpu_uuid: 'GPU-a', pid: 9, name: 'x', used_mem_mib: 1 }],
+    pid_users: [{ pid: 9, user: '1010000', ns_owner: null }],
+    pmon: [],
+    errors: [],
+  };
+  const sample = deriveSample({ id: 'n1', expectGpus: 1 }, raw, null, Date.now());
+  assert.equal(sample.procs[0].username, '1010000');
 });
 
 test('deriveSample no longer decides whether the card count is wrong', () => {
@@ -1588,6 +1634,79 @@ test('totals report the simultaneous peak, not the per-machine maximum', () => {
   const [row] = db.queryUsageTotals({ fromTs: ts - 3600000, toTs: ts + 3600000 });
   assert.equal(row.peak_gpus, 12, 'the totals query fell back to the per-machine maximum');
   assert.equal(row.gpu_seconds, 720, 'the GPU-seconds total changed');
+  db.close();
+});
+
+test('repairContainerUids folds container subuids into the namespace owner', () => {
+  const db = new Db(':memory:');
+  const hour = Math.floor(Date.now() / 3600000) * 3600000;
+  const ins = db.db.prepare(
+    `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+       sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  const insProc = db.db.prepare(
+    `INSERT INTO proc_sample (ts, host_id, gpu_index, gpu_uuid, pid, username, proc_name, used_mem_mib, sm_pct)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  const insPeak = db.db.prepare(
+    'INSERT INTO usage_peak (bucket_ts, username, peak_gpus) VALUES (?,?,?)',
+  );
+  // Two container-subuid rows, one real-user row for the same hour.
+  ins.run(hour, 'gpu17', '1010000', 10, 5, 100, 1, 10, 1);
+  ins.run(hour, 'gpu17', '1010001', 20, 8, 200, 2, 20, 2);
+  ins.run(hour, 'gpu17', 'gaobowen', 30, 12, 300, 3, 30, 3);
+  insProc.run(hour, 'gpu17', 0, 'GPU-a', 1, '1010000', 'python', 1, 10);
+  insProc.run(hour, 'gpu17', 0, 'GPU-a', 2, '1010001', 'python', 1, 10);
+  insProc.run(hour, 'gpu17', 0, 'GPU-a', 3, 'gaobowen', 'python', 1, 10);
+  insPeak.run(hour, '1010000', 1);
+  insPeak.run(hour, '1010001', 2);
+  insPeak.run(hour, 'gaobowen', 4);
+
+  const { merged, unmapped } = repairContainerUids(db.db);
+  assert.deepEqual(
+    merged.map(([a, b]) => `${a}->${b}`).sort(),
+    ['1010000->gaobowen', '1010001->gaobowen'],
+  );
+  assert.deepEqual(unmapped, []);
+
+  const rows = db.db
+    .prepare('SELECT username, gpu_seconds, sm_gpu_seconds, samples FROM usage_rollup ORDER BY username')
+    .all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].username, 'gaobowen');
+  assert.equal(rows[0].gpu_seconds, 60, 'occupancy must be summed, not overwritten');
+  assert.equal(rows[0].sm_gpu_seconds, 25);
+  assert.equal(rows[0].samples, 6);
+
+  const procs = db.db.prepare('SELECT DISTINCT username FROM proc_sample').all();
+  assert.deepEqual(procs.map((r) => r.username), ['gaobowen']);
+
+  const peak = db.db.prepare('SELECT peak_gpus FROM usage_peak WHERE username = ?').get('gaobowen');
+  assert.equal(peak.peak_gpus, 4, 'peak must be the MAX across the merged rows');
+
+  // Idempotent: a second run finds nothing left to fold.
+  const again = repairContainerUids(db.db);
+  assert.deepEqual(again.merged, []);
+  db.close();
+});
+
+test('repairContainerUids leaves unmapped numeric names alone', () => {
+  const db = new Db(':memory:');
+  const hour = Math.floor(Date.now() / 3600000) * 3600000;
+  db.db
+    .prepare(
+      `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+         sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+    )
+    .run(hour, 'gpu1', '4242', 1, 1, 1, 1, 1);
+
+  const { merged, unmapped } = repairContainerUids(db.db);
+  assert.deepEqual(merged, []);
+  assert.deepEqual(unmapped, ['4242']);
+  const row = db.db.prepare('SELECT username FROM usage_rollup').get();
+  assert.equal(row.username, '4242', 'an unmapped uid must not be guessed away');
   db.close();
 });
 

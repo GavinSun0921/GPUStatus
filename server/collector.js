@@ -106,7 +106,12 @@ export function deriveSample(host, raw, prevCpu, receivedAt = Date.now()) {
   const pidToElapsed = new Map();
   for (const u of raw.pid_users ?? []) {
     if (!u || u.pid === null || u.pid === undefined) continue;
-    if (u.user) pidToUser.set(u.pid, u.user);
+    // Accounting identity: the user-namespace owner when the process sits in a
+    // remapped userns (rootless Docker), otherwise the `ps` name. The raw
+    // `user` is the host UID as NSS sees it -- a bare number for container
+    // subuids, which must NOT roll up as a username.
+    const username = u.ns_owner ?? u.user ?? null;
+    if (username) pidToUser.set(u.pid, username);
     const secs = num(u.elapsed_s);
     if (secs !== null) pidToElapsed.set(u.pid, secs);
   }

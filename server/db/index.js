@@ -34,6 +34,7 @@ import {
   backfillUsagePeak,
   repairLostProcessSm,
   repairTruncatedUsernames,
+  repairContainerUids,
   repairUnderstatedSm,
 } from './repairs.js';
 import * as q from './queries.js';
@@ -65,6 +66,11 @@ export class Db {
     const { merged, ambiguous } = repairTruncatedUsernames(this.db);
     this.repairedUsernames = merged;
     if (ambiguous.length > 0) this.truncatedNameAmbiguities = ambiguous;
+
+    // After the truncation repair so both agree on the destination names.
+    const containerFix = repairContainerUids(this.db);
+    this.repairedContainerUids = containerFix.merged;
+    if (containerFix.unmapped.length > 0) this.unmappedContainerUids = containerFix.unmapped;
 
     backfillUsagePeak(this.db);
     this.repairedSmRows = repairLostProcessSm(

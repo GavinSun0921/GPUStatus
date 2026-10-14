@@ -227,6 +227,96 @@ export function repairTruncatedUsernames(db) {
 }
 
 /**
+ * Host UIDs that are really container subuids, mapped to the human who owns
+ * the user namespace.
+ *
+ * Evidence (gpu17, 2026-10-14), not a guess:
+ *   /etc/subuid                  `gaobowen:1000000:65536`
+ *   /proc/<pid>/uid_map          `0 1054 1` / `1 1000000 65536`
+ *   /proc/<pid>/cgroup           user-1054.slice/.../docker-*.scope
+ *   host 1010000 = container uid 10001, host 1010001 = container uid 10002
+ *
+ * Only these two are merged. A different numeric name is left alone and
+ * reported: the project rule is that a repair writes measured values, and
+ * "it looks like a uid" is not evidence of whose uid it is.
+ */
+const CONTAINER_UID_TO_USER = {
+  1010000: 'gaobowen',
+  1010001: 'gaobowen',
+};
+
+/**
+ * Fold container-subuid "usernames" into the real owner.
+ *
+ * Same merge shape as `repairTruncatedUsernames`: rename raw samples, and
+ * ADD into the destination's rollup rows rather than overwriting -- the real
+ * user usually already has a row for the same (hour, host). `usage_peak` is
+ * merged with MAX, because a missing cycle can never lower a peak.
+ *
+ * @returns {{ merged: Array<[string, string]>, unmapped: string[] }}
+ */
+export function repairContainerUids(db) {
+  const names = db
+    .prepare(
+      `SELECT DISTINCT username FROM (
+           SELECT username FROM proc_sample
+           UNION SELECT username FROM usage_rollup
+         ) WHERE username IS NOT NULL`,
+    )
+    .all()
+    .map((r) => r.username);
+
+  const merged = [];
+  const unmapped = [];
+  for (const bad of names) {
+    if (!/^[0-9]+$/.test(bad)) continue;
+    const full = CONTAINER_UID_TO_USER[bad];
+    if (!full) {
+      unmapped.push(bad);
+      continue;
+    }
+    merged.push([bad, full]);
+  }
+  if (merged.length === 0) return { merged, unmapped };
+
+  db.exec('BEGIN');
+  try {
+    for (const [bad, full] of merged) {
+      db.prepare('UPDATE proc_sample SET username = ? WHERE username = ?').run(full, bad);
+      db.prepare(
+        `INSERT INTO usage_rollup (bucket_ts, host_id, username, gpu_seconds,
+               sm_gpu_seconds, mem_mib_seconds, peak_gpus, peak_mem_mib, samples)
+             SELECT bucket_ts, host_id, ?, gpu_seconds, sm_gpu_seconds, mem_mib_seconds,
+                    peak_gpus, peak_mem_mib, samples
+               FROM usage_rollup WHERE username = ?
+             ON CONFLICT(bucket_ts, host_id, username) DO UPDATE SET
+               gpu_seconds     = gpu_seconds + excluded.gpu_seconds,
+               sm_gpu_seconds  = sm_gpu_seconds + excluded.sm_gpu_seconds,
+               mem_mib_seconds = mem_mib_seconds + excluded.mem_mib_seconds,
+               peak_gpus       = MAX(peak_gpus, excluded.peak_gpus),
+               peak_mem_mib    = MAX(peak_mem_mib, excluded.peak_mem_mib),
+               samples         = samples + excluded.samples`,
+      ).run(full, bad);
+      db.prepare('DELETE FROM usage_rollup WHERE username = ?').run(bad);
+
+      db.prepare(
+        `INSERT INTO usage_peak (bucket_ts, username, peak_gpus)
+             SELECT bucket_ts, ?, peak_gpus FROM usage_peak WHERE username = ?
+             ON CONFLICT(bucket_ts, username) DO UPDATE SET
+               peak_gpus = MAX(peak_gpus, excluded.peak_gpus)`,
+      ).run(full, bad);
+      db.prepare('DELETE FROM usage_peak WHERE username = ?').run(bad);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  return { merged, unmapped };
+}
+
+/**
  * Rebuild `usage_peak` for the retained window from proc_sample.
  *
  * Runs when the table is empty, which is the case on upgrade: the per-sample

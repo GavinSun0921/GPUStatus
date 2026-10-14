@@ -35,7 +35,7 @@ LANG=C
 LC_ALL=C
 export LANG LC_ALL
 
-PROBE_VERSION=2
+PROBE_VERSION=3
 SECTION=$(printf '\001')'SECTION'
 export SECTION
 
@@ -62,6 +62,8 @@ PROC_CSV=""
 PMON=""
 PIDS=""
 PID_USERS=""
+PID_OWNERS=""
+PID_OWNER_OUT=""
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   err "nvidia_smi_not_installed"
@@ -138,6 +140,58 @@ else
   # truncate. (A single `-o user=` column happens to auto-size, which is why the
   # bug only appeared once etime was added.)
   [ -n "$PIDS" ] && PID_USERS=$(ps -o pid=,user:32=,etime= -p "$PIDS" 2>/dev/null)
+
+  # --- container / user-namespace attribution ------------------------------
+  # `ps -o user=` prints a bare UID when NSS has no name for it. Inside a
+  # rootless Docker (or any remapped user namespace) those UIDs are subuids:
+  # gpu17's `gaobowen:1000000:65536` made container uid 10001 appear as host
+  # uid 1010000, which then rolled up as a fake username. The accounting
+  # identity is the namespace OWNER -- the host uid that container uid 0 maps
+  # to (`uid_map` line `0 1054 1` => gaobowen) -- not the in-container uid.
+  #
+  # Identity maps (`0 0 4294967295`) are left alone: there is no container
+  # boundary, and rewriting would mis-attribute root-owned work to whatever
+  # user happens to own the cgroup.
+  #
+  # /proc/<pid>/uid_map is read with the shell builtin `read` -- an awk per
+  # PID cost 547ms/80 pids; the builtin loop measures 4ms. The extra `ps -eo`
+  # (uid -> name through NSS) only runs when a remapped namespace is seen.
+  PID_OWNERS=""
+  if [ -n "$PIDS" ]; then
+    _oldifs=$IFS
+    IFS=,
+    set -- $PIDS
+    IFS=$_oldifs
+    for _pp in "$@"; do
+      [ -r "/proc/$_pp/uid_map" ] || continue
+      _ow=
+      while read -r _in _out _rest; do
+        if [ "$_in" = 0 ] && [ "$_out" != 0 ]; then
+          _ow=$_out
+          break
+        fi
+      done < "/proc/$_pp/uid_map"
+      [ -n "$_ow" ] && PID_OWNERS="${PID_OWNERS}${_pp} ${_ow}
+"
+    done
+  fi
+
+  PID_OWNER_OUT=""
+  if [ -n "$PID_OWNERS" ]; then
+    UID_NAMES=$(ps -eo uid=,user:32= 2>/dev/null | awk '!seen[$1]++ { print $1, $2 }')
+    PID_OWNER_OUT=$(printf '%s' "$PID_OWNERS" | UID_NAMES="$UID_NAMES" awk '
+      BEGIN {
+        n = split(ENVIRON["UID_NAMES"], nl, "\n")
+        for (i = 1; i <= n; i++) {
+          split(nl[i], p, " ")
+          if (p[1] != "") uname[p[1]] = p[2]
+        }
+      }
+      {
+        uid = $2
+        print $1, (uid in uname) ? uname[uid] : uid
+      }')
+  fi
 fi
 
 # Driver version, taken from /proc rather than from a fourth nvidia-smi call.
@@ -343,6 +397,9 @@ NET_FSTYPES='^(nfs|nfs4|cifs|smbfs|glusterfs|ceph|lustre|afs|9p|davfs|ncpfs|coda
 
   printf '%s\tPROC\n' "$SECTION"
   printf '%s\n' "$PROC_CSV"
+
+  printf '%s\tPIDOWNER\n' "$SECTION"
+  printf '%s\n' "$PID_OWNER_OUT"
 
   printf '%s\tPIDUSER\n' "$SECTION"
   printf '%s\n' "$PID_USERS"
@@ -558,6 +615,19 @@ section == "PROC" {
   next
 }
 
+# ---- ns-owner map: "pid owner_name" ---------------------------------------
+# Filled only for PIDs inside a REMAPPED user namespace. Absent means the
+# `ps` name is already the accounting identity.
+section == "PIDOWNER" {
+  line = trim($0)
+  if (line == "") next
+  n = split(line, f, /[ \t]+/)
+  if (n < 2) next
+  pidowner_pid[++npo]  = num(f[1])
+  pidowner_name[npo]   = trim(f[2])
+  next
+}
+
 # ---- ps -o pid=,user= ------------------------------------------------------
 section == "PIDUSER" {
   line = trim($0)
@@ -671,8 +741,13 @@ END {
 
   printf "  \"pid_users\": ["
   for (i = 1; i <= npu; i++) {
-    printf "%s\n    {\"pid\": %s, \"user\": %s, \"elapsed_s\": %s}", (i > 1 ? "," : ""),
-      piduser_pid[i], str(piduser_name[i]), piduser_secs[i]
+    owner = ""
+    for (j = 1; j <= npo; j++) {
+      if (pidowner_pid[j] == piduser_pid[i]) { owner = pidowner_name[j]; break }
+    }
+    printf "%s\n    {\"pid\": %s, \"user\": %s, \"ns_owner\": %s, \"elapsed_s\": %s}", (i > 1 ? "," : ""),
+      piduser_pid[i], str(piduser_name[i]),
+      (owner == "" ? "null" : str(owner)), piduser_secs[i]
   }
   printf "%s  ],\n", (npu > 0 ? "\n" : "")
 
