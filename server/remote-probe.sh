@@ -39,6 +39,32 @@ PROBE_VERSION=3
 SECTION=$(printf '\001')'SECTION'
 export SECTION
 
+# Disk paths configured for this host arrive as positional arguments:
+#   ssh <host> sh -s -- /home /data
+# They are captured immediately, before anything else can touch "$@" and before
+# the emit block (which runs inside a pipeline, where the script's own "$@" is
+# no longer in scope). Newline-separated is safe: the config layer rejects paths
+# containing a newline. A prior revision parsed these too late — the container-uid
+# block did `set -- $PIDS`, which ate the tagged arguments and made disk_exclude
+# a no-op whenever the host had GPU processes.
+# Arguments are tagged so both lists can travel in one command line:
+#   d:<path>  local directory to measure usage for
+#   n:<path>  network mount whose HEALTH should be checked
+#   x:<path>  mount point the operator never wants reported (disk_exclude)
+CONFIGURED_DISKS=""
+CONFIGURED_NET=""
+DISK_EXCLUDE=""
+for _arg in "$@"; do
+  case "$_arg" in
+    d:*) CONFIGURED_DISKS="${CONFIGURED_DISKS}${CONFIGURED_DISKS:+
+}${_arg#d:}" ;;
+    n:*) CONFIGURED_NET="${CONFIGURED_NET}${CONFIGURED_NET:+
+}${_arg#n:}" ;;
+    x:*) DISK_EXCLUDE="${DISK_EXCLUDE}${DISK_EXCLUDE:+
+}${_arg#x:}" ;;
+  esac
+done
+
 # --- collection ---------------------------------------------------------------
 
 TS=$(date +%s 2>/dev/null || echo 0)
@@ -158,11 +184,13 @@ else
   # (uid -> name through NSS) only runs when a remapped namespace is seen.
   PID_OWNERS=""
   if [ -n "$PIDS" ]; then
+    # Split on commas via IFS only. NEVER `set -- $PIDS`: that overwrites the
+    # script's own tagged arguments (d:/n:/x:) and silently disabled disk_exclude
+    # on every host that had at least one GPU process.
     _oldifs=$IFS
     IFS=,
-    set -- $PIDS
-    IFS=$_oldifs
-    for _pp in "$@"; do
+    for _pp in $PIDS; do
+      IFS=$_oldifs
       [ -r "/proc/$_pp/uid_map" ] || continue
       _ow=
       while read -r _in _out _rest; do
@@ -174,6 +202,7 @@ else
       [ -n "$_ow" ] && PID_OWNERS="${PID_OWNERS}${_pp} ${_ow}
 "
     done
+    IFS=$_oldifs
   fi
 
   PID_OWNER_OUT=""
@@ -217,28 +246,6 @@ if [ -z "$NVRM_LINE" ] && [ -n "$GPU_CSV" ]; then
       if ($2 ~ /^[0-9]/) { print $2; exit }
     }')
 fi
-
-# Disk paths configured for this host arrive as positional arguments:
-#   ssh <host> sh -s -- /home /data
-# They are captured here because the emit block below runs inside a pipeline,
-# where the script's own "$@" is no longer in scope. Newline-separated is safe:
-# the config layer rejects paths containing a newline.
-# Arguments are tagged so both lists can travel in one command line:
-#   d:<path>  local directory to measure usage for
-#   n:<path>  network mount whose HEALTH should be checked
-CONFIGURED_DISKS=""
-CONFIGURED_NET=""
-DISK_EXCLUDE=""
-for _arg in "$@"; do
-  case "$_arg" in
-    d:*) CONFIGURED_DISKS="${CONFIGURED_DISKS}${CONFIGURED_DISKS:+
-}${_arg#d:}" ;;
-    n:*) CONFIGURED_NET="${CONFIGURED_NET}${CONFIGURED_NET:+
-}${_arg#n:}" ;;
-    x:*) DISK_EXCLUDE="${DISK_EXCLUDE}${DISK_EXCLUDE:+
-}${_arg#x:}" ;;
-  esac
-done
 
 # Filesystem types that are NOT local storage. Two consequences:
 #   * their usage is not reported -- it belongs to the server, so every machine

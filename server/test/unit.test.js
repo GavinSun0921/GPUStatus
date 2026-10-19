@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -956,6 +957,56 @@ test('disk_exclude must be an array', () => {
     assert.throws(() => loadConfig(path), /必须是挂载点数组/);
   } finally {
     rmSync(path, { force: true });
+  }
+});
+
+test('probe keeps disk_exclude even when the host has GPU processes', () => {
+  // Regression: the container-uid block used to do `set -- $PIDS` to iterate
+  // client PIDs, which overwrote the tagged `x:` arguments. On any machine with
+  // at least one GPU job the exclusion silently disappeared and `/` + `/boot/efi`
+  // came back onto the dashboard. This runs the real probe with a stub
+  // nvidia-smi that reports one process, so the PID path is actually exercised.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const probePath = join(here, '..', 'remote-probe.sh');
+  const bin = join(tmpdir(), `gpustatus-probe-stub-${process.pid}`);
+  mkdirSync(bin, { recursive: true });
+  const stub = join(bin, 'nvidia-smi');
+  writeFileSync(
+    stub,
+    `#!/bin/sh
+case "$*" in
+  *query-gpu*)
+    echo "0, GPU-fake, Fake GPU, 50, 1000, 2000, 40, 100, [N/A]"
+    exit 0 ;;
+  *query-compute-apps*)
+    echo "GPU-fake, 424242, python, 100"
+    exit 0 ;;
+  *pmon*)
+    printf '%s\\n' '# gpu   pid  type    sm   mem   enc   dec   command' '    0   424242     C    50    10     0     0   python'
+    exit 0 ;;
+  *--version*)
+    echo "KMD version: 999.99"
+    exit 0 ;;
+esac
+exit 0
+`,
+    'utf8',
+  );
+  chmodSync(stub, 0o755);
+
+  try {
+    const res = spawnSync('sh', ['-s', '--', 'x:/', 'x:/boot/efi'], {
+      input: readFileSync(probePath, 'utf8'),
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LANG: 'C', LC_ALL: 'C' },
+    });
+    assert.equal(res.status, 0, `probe failed: ${res.stderr}`);
+    const doc = JSON.parse(res.stdout);
+    const paths = (doc.disks ?? []).map((d) => d.path);
+    assert.ok(!paths.includes('/'), `root leaked back into disks: ${paths.join(', ')}`);
+    assert.ok(!paths.includes('/boot/efi'), `EFI partition leaked back into disks: ${paths.join(', ')}`);
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
   }
 });
 
